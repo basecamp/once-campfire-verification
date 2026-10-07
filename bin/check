@@ -10,7 +10,8 @@ Dir.chdir(root) do
     %w[ruby bench/test_check_sample.rb],
     %w[ruby bench/test_validate_acks.rb],
     %w[node --check browser/smoke.mjs],
-    %w[node --check test/sidebar-reload.mjs]
+    %w[node --check test/sidebar-reload.mjs],
+    %w[node --check test/autocomplete-json.mjs]
   ]
   results = commands.map { |command| system(*command) }
   abort "verification harness checks failed" unless results.all?

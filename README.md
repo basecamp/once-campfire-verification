@@ -31,6 +31,12 @@ A dependency-free frontend regression can also check an implementation’s room-
 node test/sidebar-reload.mjs ../once-campfire/app/javascript/controllers/rooms_list_controller.js
 ```
 
+For frontends that negotiate JSON autocomplete responses:
+
+```sh
+node test/autocomplete-json.mjs ../once-campfire-elixir/assets/overrides/lib/autocomplete/base_autocomplete_handler.js
+```
+
 The browser flow creates and modifies accounts, rooms and messages. Run each implementation's own complete test suite as well: shared checks complement framework-specific tests and screenshot inventories.
 
 Results, seeds and browser artifacts stay in ignored directories. No benchmark result files are committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
