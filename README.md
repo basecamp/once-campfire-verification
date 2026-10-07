@@ -4,6 +4,8 @@ Shared verification and benchmarks for [Campfire](https://github.com/basecamp/on
 
 Every measured HTTP response must match its route contract: status, headers, complete decoded body, expected messages and content. Every acknowledged message write must match its exact persisted ID, body, room and search-index entry. Any invalid response or failed write audit fails the run. Browser flows check installation, live messages, editing, search, permissions, settings, invitations and session transfer.
 
+See the [current results and verification report](docs/performance-review.md).
+
 ## Run
 
 Requires Ruby with Minitest, Rust 1.98.1, Node 22.18+, SQLite CLI, FFmpeg, Git and Docker. Keep this checkout alongside the implementation checkouts.
@@ -40,7 +42,7 @@ node test/autocomplete-json.mjs ../once-campfire-elixir/assets/overrides/lib/aut
 
 The browser flow creates and modifies accounts, rooms and messages. Run each implementation's own complete test suite as well: shared checks complement framework-specific tests and screenshot inventories.
 
-Results, seeds and browser artifacts stay in ignored directories. No benchmark result files are committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
+Raw results, seeds and browser artifacts stay in ignored directories. Raw benchmark receipts are not committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
 
 ## Provenance
 
