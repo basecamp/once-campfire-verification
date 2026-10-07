@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+# This gate intentionally requires a fresh, disposable instance.
+require "rbconfig"
+exec "node", File.expand_path("../browser/smoke.mjs", __dir__), *ARGV

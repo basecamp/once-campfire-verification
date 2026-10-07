@@ -1,0 +1,61 @@
+#!/usr/bin/env ruby
+# Build fixtures through the public Rails models, including real attachment variants.
+require_relative "../bench/comparison_support"
+require "digest"
+require "tmpdir"
+require "securerandom"
+require "openssl"
+include BenchmarkSupport
+root = File.expand_path("..", __dir__)
+revision = "90b330024dec3e757c79b6a7e6568f93da8e3148"
+options = { output: File.join(root, "fixtures/default"), image: nil }
+OptionParser.new do |parser|
+  parser.on("--output PATH") { |value| options[:output] = File.expand_path(value) }
+  parser.on("--image IMAGE", "Use an already built reference image of the pinned Rails revision") { |value| options[:image] = value }
+  parser.on("--help") { puts parser; exit }
+end.parse!
+abort "output already exists: #{options[:output]}" if File.exist?(options[:output])
+reference = File.join(root, "tmp/reference")
+FileUtils.mkdir_p(File.dirname(reference))
+unless File.directory?(File.join(reference, ".git"))
+  run("git", "clone", "--no-checkout", "https://github.com/basecamp/once-campfire.git", reference)
+end
+run("git", "-C", reference, "checkout", "--detach", revision)
+raise "reference revision mismatch" unless run("git", "-C", reference, "rev-parse", "HEAD").strip == revision
+image = options[:image] || "once-campfire-verification:reference-#{revision[0, 7]}"
+unless options[:image]
+  system("docker", "build", "--build-arg", "APP_VERSION=verification", "--build-arg", "GIT_REVISION=#{revision}", "-t", image, reference) || abort("reference image build failed")
+end
+FileUtils.mkdir_p(File.dirname(options[:output]))
+Dir.mktmpdir(".seed-", File.dirname(options[:output])) do |data|
+  FileUtils.mkdir_p(%w[db storage].map { |name| File.join(data, name) })
+  key = OpenSSL::PKey::EC.generate("prime256v1")
+  credentials = {
+    "SECRET_KEY_BASE" => SecureRandom.hex(64),
+    "VAPID_PUBLIC_KEY" => [key.public_key.to_octet_string(:uncompressed)].pack("m0").tr("+/", "-_"),
+    "VAPID_PRIVATE_KEY" => [key.private_key.to_s(2).rjust(32, "\0")].pack("m0").tr("+/", "-_"),
+    "VERIFICATION_PASSWORD" => SecureRandom.hex(16),
+    "VERIFICATION_BENDER_TOKEN" => SecureRandom.hex(16),
+    "VERIFICATION_DEPLOY_TOKEN" => SecureRandom.hex(16),
+    "VERIFICATION_OLD_TOKEN" => SecureRandom.hex(16)
+  }
+  env_file = File.join(data, "reference.env")
+  File.write(env_file, File.read(File.join(root, "fixtures/reference.env")) + credentials.map { |name, value| "#{name}=#{value}\n" }.join)
+  File.chmod(0o600, env_file)
+  command = ["docker", "run", "--rm", "--user", "#{Process.uid}:#{Process.gid}", "--env-file", env_file, "-e", "RAILS_LOG_LEVEL=warn",
+    *mounts(File.join(data, "db") => "/rails/storage/db", File.join(data, "storage") => "/rails/storage/files", File.join(reference, "test/fixtures") => "/rails/test/fixtures:ro", root => "/verification:ro"),
+    "--entrypoint", "sh", image, "-eu", "-c", <<~SH]
+      env -u LD_PRELOAD redis-server --daemonize yes --save '' --appendonly no --logfile /dev/null --pidfile /tmp/verification-redis.pid
+      bin/rails db:prepare
+      bin/rails runner /verification/fixtures/seeds/build.rb default
+    SH
+  system(*command) || abort("fixture build failed")
+  FileUtils.mv(File.join(data, "db/labels.json"), File.join(data, "labels.json"))
+  result = run("sqlite3", "-readonly", File.join(data, "db/production.sqlite3"), "PRAGMA integrity_check;").strip
+  raise "invalid fixture: #{result}" unless result == "ok"
+  write_json(File.join(data, "source.json"), repository: "https://github.com/basecamp/once-campfire", revision: revision,
+    image: run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip,
+    seed_sha256: Digest::SHA256.file(File.join(data, "db/production.sqlite3")).hexdigest)
+  FileUtils.cp_r(data, options[:output])
+end
+puts options[:output]

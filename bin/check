@@ -1,0 +1,15 @@
+#!/usr/bin/env ruby
+root = File.expand_path("..", __dir__)
+Dir.chdir(root) do
+  commands = [
+    %w[cargo fmt --manifest-path loadgen/Cargo.toml --check],
+    %w[cargo clippy --locked --manifest-path loadgen/Cargo.toml --all-targets -- -D warnings],
+    %w[cargo test --locked --manifest-path loadgen/Cargo.toml],
+    %w[ruby bench/test_contracts.rb],
+    %w[ruby bench/test_check_sample.rb],
+    %w[ruby bench/test_validate_acks.rb],
+    %w[node --check browser/smoke.mjs]
+  ]
+  results = commands.map { |command| system(*command) }
+  abort "verification harness checks failed" unless results.all?
+end

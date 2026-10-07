@@ -1,0 +1,14 @@
+{
+  "name": "once-campfire-verification",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "node --check browser/smoke.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
