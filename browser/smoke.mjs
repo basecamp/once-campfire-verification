@@ -158,9 +158,9 @@ try {
   if (copiedLink !== `${roomURL}/@${numericID}`)
     throw new Error(`Incorrect message permalink: ${copiedLink}`)
   await message.getByRole("link", { name: "Edit", exact: true }).click()
-  await message
-    .getByRole("textbox", { name: "Edit message", exact: true })
-    .fill("Edited in the browser")
+  const editField = message.getByRole("textbox", { name: "Edit message", exact: true })
+  await editField.click()
+  await editField.fill("Edited in the browser")
   await message
     .getByRole("button", { name: "Save changes", exact: true })
     .click()
