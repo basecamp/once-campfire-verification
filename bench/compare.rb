@@ -125,7 +125,10 @@ begin
       when "express" then {http_workers: config.fetch("WEB_WORKERS", "auto (cpuset)"), cable: "native ws with cluster IPC", jobs: "leased auxiliary SQLite"}
       when "laravel" then {http: "FrankenPHP/Octane", jobs: "leased auxiliary SQLite", cable: "native ReactPHP"}
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
-      when "django" then {http_workers: config.fetch("WEB_WORKERS", "1"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
+      when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
+      end
+      if kind != "c"
+        metadata[:topology][app][:response_cache_mb] = config.fetch("CAMPFIRE_RESPONSE_CACHE_MB", "64")
       end
       command = ["docker", "run", "-d", "--name", container, "--network", "host", "--cpuset-cpus", options[:cpus]]
       command.concat environment(config)
