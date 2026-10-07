@@ -29,7 +29,18 @@ try {
     permissions: ["clipboard-read", "clipboard-write"],
   })
   const errors = []
+  async function settled(page) {
+    await page.waitForFunction(() => !document.querySelector('form[aria-busy="true"], html[aria-busy="true"], turbo-frame[aria-busy="true"]'))
+  }
+  async function navigate(page, url) {
+    await settled(page)
+    await page.goto(url)
+  }
   function watch(page) {
+    const failedRequests = []
+    page.on("requestfailed", (request) => {
+      failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText}`)
+    })
     if (process.env.DEBUG_BROWSER) {
       page.on("response", async (res) => {
         if (
@@ -50,7 +61,7 @@ try {
       )
     }
     page.on("pageerror", (error) => {
-      errors.push(String(error))
+      errors.push(`${error.stack || String(error)} on ${page.url()}\n${failedRequests.slice(-5).join("\n")}`)
       if (process.env.DEBUG_BROWSER) console.error(error)
     })
     page.on("console", (msg) => {
@@ -74,7 +85,7 @@ try {
   }
   const first = await context.newPage()
   const firstSubscribed = watch(first)
-  await first.goto(`${base}/first_run`)
+  await navigate(first, `${base}/first_run`)
   await first.locator('[name="user[name]"]').fill("Browser User")
   await first
     .locator('[name="user[email_address]"]')
@@ -89,7 +100,7 @@ try {
   const roomURL = first.url()
   const second = await context.newPage()
   const secondSubscribed = watch(second)
-  await second.goto(first.url())
+  await navigate(second, first.url())
   await Promise.race([
     Promise.all([firstSubscribed, secondSubscribed]),
     new Promise((_, reject) =>
@@ -157,12 +168,12 @@ try {
     .locator(".messages > .message[data-message-id]")
     .filter({ hasText: "Edited in the browser" })
     .waitFor()
-  await first.goto(`${base}/searches?q=Edited`)
+  await navigate(first, `${base}/searches?q=Edited`)
   await first
     .locator("#search-results > .message")
     .filter({ hasText: "Edited in the browser" })
     .waitFor()
-  await first.goto(`${base}/users/me/profile`)
+  await navigate(first, `${base}/users/me/profile`)
   await first.locator('[name="user[bio]"]').fill("Browser profile update")
   await first.getByRole("button", { name: "Save changes", exact: true }).click()
   await first.waitForFunction(
@@ -170,6 +181,10 @@ try {
       document.querySelector('[name="user[bio]"]').value ===
       "Browser profile update",
   )
+  await settled(first)
+  await first.reload()
+  if ((await first.locator('[name="user[bio]"]').inputValue()) !== "Browser profile update")
+    throw new Error("Profile update did not persist")
   const transferURL = await first.locator("#session_transfer_url").inputValue()
   if (!transferURL.startsWith(`${base}/session/transfers/`))
     throw new Error("Missing transfer URL")
@@ -204,7 +219,7 @@ try {
     qr.height <= 0
   )
     throw new Error(`QR code failed: ${JSON.stringify(qr)}`)
-  await first.goto(`${base}/account/edit`)
+  await navigate(first, `${base}/account/edit`)
   await first.locator('[name="account[name]"]').fill("Browser Campfire")
   await first.getByRole("button", { name: "Save changes", exact: true }).click()
   await first.waitForFunction(
@@ -212,7 +227,11 @@ try {
       document.querySelector('[name="account[name]"]').value ===
       "Browser Campfire",
   )
-  await first.goto(`${base}/rooms/opens/new`)
+  await settled(first)
+  await first.reload()
+  if ((await first.locator('[name="account[name]"]').inputValue()) !== "Browser Campfire")
+    throw new Error("Account update did not persist")
+  await navigate(first, `${base}/rooms/opens/new`)
   await first
     .getByRole("textbox", { name: "Name this room", exact: true })
     .fill("Browser room")
@@ -248,7 +267,7 @@ try {
     .locator("#shared_rooms a")
     .filter({ hasText: "Renamed browser room" })
     .waitFor()
-  await first.goto(`${base}/account/bots/new`)
+  await navigate(first, `${base}/account/bots/new`)
   await first
     .getByPlaceholder("Name the bot", { exact: true })
     .fill("Browser bot")
@@ -277,7 +296,7 @@ try {
   await first
     .getByRole("link", { name: "Edit Renamed browser bot", exact: true })
     .waitFor()
-  await first.goto(`${base}/account/custom_styles/edit`)
+  await navigate(first, `${base}/account/custom_styles/edit`)
   await first
     .locator('[name="account[custom_styles]"]')
     .fill("body { --browser-test: verified; }")
@@ -290,7 +309,7 @@ try {
         .getPropertyValue("--browser-test")
         .trim() === "verified",
   )
-  await first.goto(`${base}/account/edit`)
+  await navigate(first, `${base}/account/edit`)
   if (
     (
       await first.evaluate(() =>
@@ -309,9 +328,10 @@ try {
   const transferContext = await browser.newContext()
   const transferred = await transferContext.newPage()
   watch(transferred)
-  await transferred.goto(transferURL)
+  await navigate(transferred, transferURL)
   await transferred.waitForURL(/\/rooms\/\d+$/)
-  await transferred.goto(`${base}/users/me/profile`)
+  await transferred.locator(".messages").waitFor({ state: "attached" })
+  await navigate(transferred, `${base}/users/me/profile`)
   if (
     (await transferred.locator('[name="user[email_address]"]').inputValue()) !==
     "browser@example.test"
@@ -321,7 +341,7 @@ try {
   const joinedContext = await browser.newContext()
   const joined = await joinedContext.newPage()
   watch(joined)
-  await joined.goto(inviteURL)
+  await navigate(joined, inviteURL)
   await joined.locator('[name="user[name]"]').fill("Joined browser user")
   await joined
     .locator('[name="user[email_address]"]')
@@ -333,10 +353,11 @@ try {
       .locator('form:has(input[name="user[name]"]) button[type="submit"]')
       .click(),
   ])
-  await joined.goto(`${base}/account/edit`)
+  await joined.locator(".messages").waitFor({ state: "attached" })
+  await navigate(joined, `${base}/account/edit`)
   if (await joined.getByRole("link", { name: "Set up chat bots" }).count())
     throw new Error("Member sees admin controls")
-  await first.goto(roomURL)
+  await navigate(first, roomURL)
   await first.getByRole("link", { name: "New Ping" }).click()
   const autocomplete = first.locator('[data-autocomplete-target="input"]')
   await autocomplete.fill("Joined browser")
@@ -373,6 +394,8 @@ try {
       exact: true,
     })
     .waitFor()
+  await settled(first)
+  await settled(joined)
   await joinedContext.close()
   if (errors.length) throw new Error(errors.join("\n"))
   console.log(

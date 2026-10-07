@@ -26,6 +26,8 @@ image = options[:image] || "once-campfire-verification:reference-#{revision[0, 7
 unless options[:image]
   system("docker", "build", "--build-arg", "APP_VERSION=verification", "--build-arg", "GIT_REVISION=#{revision}", "-t", image, reference) || abort("reference image build failed")
 end
+image_env = JSON.parse(run("docker", "image", "inspect", "-f", "{{json .Config.Env}}", image))
+raise "reference image revision mismatch" unless image_env.include?("GIT_REVISION=#{revision}")
 FileUtils.mkdir_p(File.dirname(options[:output]))
 Dir.mktmpdir(".seed-", File.dirname(options[:output])) do |data|
   FileUtils.mkdir_p(%w[db storage].map { |name| File.join(data, name) })
