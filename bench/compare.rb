@@ -14,7 +14,7 @@ options = { apps: "rails,django,laravel,express,elixir,go,rust,c", rounds: 3, du
   workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false,
   loadgen: ENV.fetch("LOADGEN", File.join(repo, "loadgen/target/release/loadgen")),
   env_file: ENV.fetch("BENCH_ENV_FILE", File.join(repo, "fixtures/default/reference.env")),
-  output: File.join(work, "results"), cpus: "8-11", client_cpus: "12-15",
+  output: File.join(work, "results", "#{Time.now.utc.strftime('%Y%m%d-%H%M%S')}-#{Process.pid}"), cpus: "8-11", client_cpus: "12-15",
   routes: "room_show,messages_page,sidebar,search,avatar,static_css,up,post_message" }
 OptionParser.new do |parser|
   options.each do |key, default|
@@ -41,6 +41,8 @@ original_seed_sha = Digest::SHA256.file(File.join(options[:seed], "db/production
 room = Integer(labels.fetch("rooms.watercooler"))
 write_room = Integer(labels.fetch("rooms.hq"))
 base = "http://127.0.0.1:#{options[:port]}"
+raise "output already exists: #{options[:output]}" if File.exist?(options[:output])
+sample_number = 0
 fixture_env = File.readlines(options[:env_file], chomp: true).reject { |line| line.empty? || line.start_with?("#") }.to_h { |line| line.split("=", 2) }
 lg = ->(*args) do
   started = clock
@@ -56,12 +58,14 @@ lg = ->(*args) do
   if args.first == "http"
     cpu_after = Process.times
     value["generator_cpu_percent"] = 100.0 * (cpu_after.cutime + cpu_after.cstime - cpu_before.cutime - cpu_before.cstime) / (clock - started)
+    sample_number += 1
+    write_json(File.join(options[:output], "raw", "http-#{sample_number}.json"), value)
   end
   value
 end
 container = "cf-native-bench-#{Process.pid}"
 results = []
-metadata = { response_validation: "route-contract-v1", started_at: Time.now.utc.iso8601, seed_sha256: original_seed_sha, server_cpus: options[:cpus],
+metadata = { verification_revision: run("git", "-C", repo, "rev-parse", "HEAD").strip, response_validation: "route-contract-v1", started_at: Time.now.utc.iso8601, seed_sha256: original_seed_sha, server_cpus: options[:cpus],
   client_cpus: options[:client_cpus], network: "host", gzip: true, duration: options[:duration],
   concurrencies: options[:concurrencies], rounds: options[:rounds], loadgen_sha256: Digest::SHA256.file(options[:loadgen]).hexdigest,
   routes: options[:routes], images: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
@@ -81,10 +85,14 @@ begin
       images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
       image = ENV.fetch("#{env_name.(app)}_IMAGE", images.fetch(app, "once-campfire-#{app}:app"))
       source = File.join(options[:workspace], kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
-      metadata[:images][app] = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
+      image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
+      raise "#{app}: image changed between rounds" if metadata[:images].key?(app) && metadata[:images][app] != image_id
+      metadata[:images][app] = image_id
       metadata[:image_labels][app] = JSON.parse(run("docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image))
-      metadata[:source_revisions][app] = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
+      source_identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
         dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
+      raise "#{app}: source changed between rounds" if metadata[:source_revisions].key?(app) && metadata[:source_revisions][app] != source_identity
+      metadata[:source_revisions][app] = source_identity
       data = File.join(work, "runtime", Process.pid.to_s, "#{app}-#{iteration + 1}")
       prepare_storage(options[:seed], data)
       FileUtils.mkdir_p(File.join(data, "logs"))
@@ -199,6 +207,7 @@ begin
     end
     [app, values]
   end
+  metadata[:complete] = true
   write_json(File.join(options[:output], "summary.json"), metadata: metadata, results: summary)
   puts JSON.pretty_generate(summary)
 ensure
