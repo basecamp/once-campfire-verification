@@ -31,7 +31,7 @@ A dependency-free frontend regression can also check an implementation’s room-
 node test/sidebar-reload.mjs ../once-campfire/app/javascript/controllers/rooms_list_controller.js
 ```
 
-This flow creates and modifies accounts, rooms and messages. Run each implementation's own complete test suite as well: shared checks complement framework-specific tests and screenshot inventories.
+The browser flow creates and modifies accounts, rooms and messages. Run each implementation's own complete test suite as well: shared checks complement framework-specific tests and screenshot inventories.
 
 Results, seeds and browser artifacts stay in ignored directories. No benchmark result files are committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
 
