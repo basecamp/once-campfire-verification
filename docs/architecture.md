@@ -40,8 +40,8 @@ also namespaces native fallback fragments by the pre-render epoch and request ho
 conditional requests and when whole-response caching is disabled; its existing store has a
 4,096-entry bound. Django renders its page body directly. Go, Rust and Express namespace nested fragments by the
 request's observed database generation. Old in-flight renders retain their old namespace,
-while all namespaces share the existing byte budget. Rust also separates fragments by origin
-because nested OpenGraph presentation depends on the request host. Native regressions target
+while all namespaces share the existing byte budget. Go and Rust also separate fragments by
+request origin; nested OpenGraph presentation and absolute links can depend on that origin. Native regressions target
 foreign writes and stale admissions; a whole-page version check alone would not prove these
 nested-cache properties.
 
@@ -54,6 +54,12 @@ Fresh framework token masks and session/cookie middleware remain outside reusabl
 Rails, Django, Laravel and Elixir retain normal framework/front-server compression; Go, Rust,
 Express and C can retain completed compressed representations. Conditional requests and
 flash require the native response rules, not an authorization shortcut.
+
+Message pagination validators must describe the rendered response. Rails, Go, Rust and Elixir
+now derive pagination ETags from its actual content and omit timestamp-only Last-Modified
+headers. A compatible foreign SQLite writer can change rich text, names or boosts without
+touching the message timestamp, so a record-only validator can wrongly return 304. Fresh CSRF
+masks can change an HTML representation's ETag even when its visible message text is unchanged.
 
 Worth considering next:
 
