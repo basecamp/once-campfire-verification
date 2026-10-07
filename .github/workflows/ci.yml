@@ -12,6 +12,10 @@ jobs:
           persist-credentials: false
       - name: Install prerequisites
         run: |
+          sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i \
+              -e 's|https\?://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+              -e 's|mirror+file:/etc/apt/apt-mirrors\.txt|https://archive.ubuntu.com/ubuntu/|g' {} +
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ruby ruby-minitest sqlite3 ffmpeg
           rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
