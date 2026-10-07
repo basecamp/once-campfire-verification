@@ -15,7 +15,7 @@ sequential measurements of the final source and images.
 | Elixir | SQL probe/fallback; grouped membership query | Dedicated database observer; fresh authentication/access and CSRF masks | HTML; normal Plug compression | SQLite autocheckpoint | Redis/Resque |
 | Go | SQL probe/fallback; grouped membership query | Pinned read-only SQLite observer; fresh authentication/access | Completed HTML/gzip; immutable fragment/list/layout parts | SQLite autocheckpoint | Bounded in-process |
 | Rust | SQL probe/fallback; grouped membership query | Dedicated observer; fresh authentication/access | Completed bodies plus fragment deflate reuse | Dedicated checkpointer with writer fallback | Bounded in-process |
-| C | SQL probe/fallback; grouped membership query | Dedicated version source; authorization checked on each lookup | Completed bodies and gzip | SQLite autocheckpoint | Bounded in-process |
+| C | SQL probe/fallback; grouped membership query | Dedicated version source; fresh authentication/access on each lookup | Completed bodies and gzip | SQLite autocheckpoint | Bounded in-process |
 
 Compiled ERB, Jinja, Blade, Eta, EEx, Go templates, Askama and C renderers are equivalent
 ways to avoid repeatedly parsing templates. A framework does not need replacing to obtain
@@ -26,11 +26,32 @@ Pooling and session behavior differ, so a larger
 worker count is not automatically an improvement. Multiple HTTP workers require shared
 broadcast delivery; an isolated process's subscriber list cannot deliver to another worker.
 
-A page-cache miss must not recover stale HTML from a nested fragment cache. Go and Express
-namespace message fragments by the observed database generation, including foreign SQL
-edits that do not update timestamps. Requests captured before a commit cannot populate the
-newer namespace. The other implementations' admission and fragment rules need their own
-external-write regressions; a whole-page generation check alone proves neither property.
+Every authenticated page cache captures its SQLite epoch before loading the current user,
+checks it at lookup and checks it again before admitting the completed response. A commit
+during authentication or rendering therefore cannot publish an old snapshot under the new
+epoch. Dedicated read-only observers see both local and foreign commits; Express combines
+its persistent connection's foreign-commit version with its local write epoch. SQLite rollbacks
+do not invalidate a committed snapshot. Observer failures bypass the optional cache.
+
+A page-cache miss must also avoid stale nested HTML after foreign SQL edits that leave record
+timestamps unchanged. Rails disables fragment caching while rendering these misses; Laravel
+and Elixir bypass their message/boost fragment memoization for the captured response. Django
+renders its page body directly. Go, Rust and Express namespace nested fragments by the
+request's observed database generation. Old in-flight renders retain their old namespace,
+while all namespaces share the existing byte budget. Rust also separates fragments by origin
+because nested OpenGraph presentation depends on the request host. Native regressions target
+foreign writes and stale admissions; a whole-page version check alone would not prove these
+nested-cache properties.
+
+Rails, Django, Laravel, Express, Elixir, Go and Rust use `CAMPFIRE_RESPONSE_CACHE_MB`;
+C uses `CF_CACHE_BYTES` in bytes. The default is 64 MiB (`67,108,864` bytes in C), and zero
+disables response reuse. Budgets apply to each process or persistent worker, except
+C's shared process store. They account for cached payloads and entry overhead, rather than
+limiting total application memory. Nested fragment stores have their own existing bounds.
+Fresh framework token masks and session/cookie middleware remain outside reusable bodies.
+Rails, Django, Laravel and Elixir retain normal framework/front-server compression; Go, Rust,
+Express and C can retain completed compressed representations. Conditional requests and
+flash require the native response rules, not an authorization shortcut.
 
 Worth considering next:
 
