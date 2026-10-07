@@ -41,13 +41,18 @@ the raw CSRF secret. All request methods capture the epoch; detached broadcasts,
 renderers do not run authentication callbacks, render without fragment caching. Shared
 Rails.cache and class-level rate-limit stores stay unchanged. Sixteen fixed render locks
 collapse concurrent cold page misses without an unbounded per-key lock map. Laravel
-and Elixir bypass their message/boost fragment memoization for the captured response. Elixir
+captures the epoch on every route and shares one 64 MiB budget between completed pages and
+token-neutral native message/boost fragments; detached renders without a captured snapshot
+bypass reuse. Laravel and Elixir bypass their message/boost fragment memoization for the
+captured response. Elixir
 also namespaces native fallback fragments by the pre-render epoch and request host, including
 conditional requests and when whole-response caching is disabled; its existing store has a
 4,096-entry bound. Django renders its page body directly. Go, Rust and Express namespace nested fragments by the
 request's observed database generation. Old in-flight renders retain their old namespace,
 while all namespaces share the existing byte budget. Go and Rust also separate fragments by
-request origin; nested OpenGraph presentation and absolute links can depend on that origin. Native regressions target
+request origin; nested OpenGraph presentation and absolute links can depend on that origin.
+Rust also captures detached presentation snapshots before database reads and isolates their
+absence of an HTTP origin from request renders. Native regressions target
 foreign writes and stale admissions; a whole-page version check alone would not prove these
 nested-cache properties.
 
