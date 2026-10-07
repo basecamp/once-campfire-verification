@@ -20,7 +20,7 @@ async function fixture(source) {
   const code = source.replace(/^import .*\n/gm, "").replace("export default class", "globalThis.RoomsListController = class")
   vm.runInContext(code, context)
   const controller = new context.RoomsListController()
-  controller.element = { loaded: pending.promise, isConnected: true, reload() { reloads++ } }
+  controller.element = { addEventListener() {}, removeEventListener() {}, loaded: pending.promise, isConnected: true, reload() { reloads++ } }
   await controller.connect()
   return { controller, get callbacks() { return callbacks }, pending, reloads: () => reloads }
 }

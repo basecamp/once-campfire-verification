@@ -11,6 +11,7 @@ Dir.chdir(root) do
     %w[ruby bench/test_validate_acks.rb],
     %w[node --check browser/smoke.mjs],
     %w[node --check test/sidebar-reload.mjs],
+    %w[node --check test/editor-preservation.mjs],
     %w[node --check test/autocomplete-json.mjs]
   ]
   results = commands.map { |command| system(*command) }

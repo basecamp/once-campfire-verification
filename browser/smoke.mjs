@@ -328,6 +328,14 @@ try {
   const transferContext = await browser.newContext()
   const transferred = await transferContext.newPage()
   watch(transferred)
+  const transferPage = await transferContext.request.get(transferURL, { maxRedirects: 0 })
+  if (transferPage.status() !== 200 || !transferPage.headers()["content-type"]?.startsWith("text/html"))
+    throw new Error("Transfer GET must return its sign-in form")
+  const transferHTML = await transferPage.text()
+  const transferForms = transferHTML.match(/<form\b/g)?.length ?? 0
+  if (!transferForms || transferForms !== (transferHTML.match(/<\/form\s*>/g)?.length ?? 0) ||
+      !/data-controller="[^"]*\bauto-submit\b/.test(transferHTML))
+    throw new Error("Transfer page must contain a complete auto-submit form")
   await navigate(transferred, transferURL)
   await transferred.waitForURL(/\/rooms\/\d+$/)
   await transferred.locator(".messages").waitFor({ state: "attached" })
@@ -357,19 +365,57 @@ try {
   await navigate(joined, `${base}/account/edit`)
   if (await joined.getByRole("link", { name: "Set up chat bots" }).count())
     throw new Error("Member sees admin controls")
-  await navigate(first, roomURL)
-  await first.getByRole("link", { name: "New Ping" }).click()
-  const autocomplete = first.locator('[data-autocomplete-target="input"]')
-  await autocomplete.fill("Joined browser")
-  await first
-    .locator("suggestion-option")
-    .getByText("Joined browser user", { exact: true })
-    .click()
-  await first.waitForFunction(
-    () =>
-      document.querySelector('[data-autocomplete-target="select"]')
-        ?.selectedOptions.length === 1,
-  )
+  let sidebarRequests = 0
+  let releaseSidebarReload
+  const sidebarRelease = new Promise((resolve) => { releaseSidebarReload = resolve })
+  // Hold the subscription refresh until there is a live draft to preserve.
+  await first.route("**/users/me/sidebar", async (route) => {
+    sidebarRequests++
+    if (sidebarRequests === 2) {
+      await first.evaluate(() => { window.__sidebarTestHeld = true })
+      await sidebarRelease
+    }
+    await route.continue()
+  })
+  try {
+    await navigate(first, roomURL)
+    await first.getByRole("link", { name: "New Ping" }).click()
+    const autocomplete = first.locator('[data-autocomplete-target="input"]')
+    await autocomplete.fill("Joined browser")
+    await first
+      .locator("suggestion-option")
+      .getByText("Joined browser user", { exact: true })
+      .click()
+    await first.waitForFunction(
+      () =>
+        document.querySelector('[data-autocomplete-target="select"]')
+          ?.selectedOptions.length === 1,
+    )
+    await autocomplete.fill("typed draft survives sidebar")
+    await first.evaluate(() => {
+      window.__originalPicker = document.querySelector('[data-autocomplete-target="input"]')
+    })
+    await first.waitForFunction(() => window.__sidebarTestHeld)
+    releaseSidebarReload()
+    await first.locator("#user_sidebar").evaluate((element) => element.loaded)
+    if (!await first.evaluate(() => window.__originalPicker === document.querySelector('[data-autocomplete-target="input"]')))
+      throw new Error("Sidebar replaced the actual input node")
+    if (await autocomplete.inputValue() !== "typed draft survives sidebar")
+      throw new Error("Sidebar dropped draft input")
+    if (await first.locator('[data-autocomplete-target="select"]').evaluate((element) => element.selectedOptions.length) !== 1)
+      throw new Error("Sidebar dropped selected recipient")
+    if (await first.locator("#direct_rooms_control").getAttribute("data-turbo-permanent") !== null)
+      throw new Error("Temporary permanence leaked")
+    await first.getByRole("link", { name: "Cancel changes" }).click()
+    await first.getByRole("link", { name: "New Ping" }).waitFor()
+    await first.getByRole("link", { name: "New Ping" }).click()
+    await autocomplete.fill("Joined browser")
+    await first.locator("suggestion-option").getByText("Joined browser user", { exact: true }).click()
+    await first.waitForFunction(() => document.querySelector('[data-autocomplete-target="select"]')?.selectedOptions.length === 1)
+  } finally {
+    releaseSidebarReload()
+    await first.unroute("**/users/me/sidebar")
+  }
   if (process.env.DEBUG_BROWSER)
     console.error(
       await first

@@ -29,6 +29,7 @@ A dependency-free frontend regression can also check an implementation’s room-
 
 ```sh
 node test/sidebar-reload.mjs ../once-campfire/app/javascript/controllers/rooms_list_controller.js
+node test/editor-preservation.mjs ../once-campfire/app/javascript/controllers/rooms_list_controller.js
 ```
 
 For frontends that negotiate JSON autocomplete responses:
