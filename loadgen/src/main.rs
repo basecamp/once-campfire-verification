@@ -8,6 +8,7 @@
 //!   loadgen cable  --base URL --cookie C --room ID --csrf T --clients N [--streams a,b,c]
 //!                  [--sources 127.0.0.2,127.0.0.3 --hold-secs 60 --deflate 1]
 //!                  [--latency-msgs 30 --interval-ms 200 --tput-secs 15 --posters 4]
+//!                  [--sessions FILE --refresh-secs 50]
 //!   loadgen upload --base URL --cookie C --room ID --csrf T --file PATH [--reps 5]
 //!   loadgen fetch  --base URL --cookie C --path P --out FILE     -> saves an uncompressed body
 //!   loadgen gzip   --file F [--iters 200]                         -> CPU per compression, by backend/level
@@ -15,6 +16,13 @@
 //! `http` also takes `--gzip 0` (`Accept-Encoding: identity`), `--requests N` (stop after N requests,
 //! for allocation counting) and `--trace FILE` (each request's start, latency and status). `cable` prints `PHASE <name> <unix ms>` lines on stderr so memory
 //! samples can be attributed to its phases.
+//!
+//! By default every `cable` client is a tab of the `--cookie` user. `--sessions FILE` makes them different people:
+//! one line per person, `cookie<TAB>identifier<TAB>identifier...` (the subscriptions that person's page makes), client n
+//! taking line n % lines, so per-member work (each person's unread notice, presence row and user streams) is exercised.
+//! `--refresh-secs S` sends `PresenceChannel#refresh` every S seconds from each client, as a visible room page does
+//! every 50; it needs a PresenceChannel identifier among the subscriptions and is not supported with `--deflate`.
+//! The result counts the unread-room notices received (`unread_frames`) and the refreshes sent.
 //!
 //! Every command takes `--user-agent UA`, sent as the `User-Agent` of each request it makes,
 //! WebSocket handshakes included; without it there is no `User-Agent` header. For example, a
@@ -440,6 +448,10 @@ struct Delivery {
     receipts: AtomicU64,
     /// Bytes read off the sockets (`--deflate` clients only): what the network carries.
     wire_bytes: AtomicU64,
+    /// UnreadRoomsChannel notices received (`{"roomId":..}`), across all clients.
+    unread_frames: AtomicU64,
+    /// PresenceChannel#refresh commands sent (`--refresh-secs`).
+    refreshes: AtomicU64,
 }
 
 fn markers(text: &str) -> Vec<u64> {
@@ -468,11 +480,12 @@ async fn cable_client(
     connected: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     delivery: Arc<Delivery>,
+    refresh: Option<(f64, f64)>,
 ) -> Res<()> {
     let mut req = format!("ws://{addr}/cable").into_client_request()?;
     let h = req.headers_mut();
     h.insert("cookie", cookie.parse()?);
-    h.insert("origin", format!("http://{addr}").parse()?);
+    h.insert("origin", origin_for(&addr).parse()?);
     h.insert("sec-websocket-protocol", "actioncable-v1-json, actioncable-unsupported".parse()?);
     if let Some(user_agent) = user_agent() {
         h.insert("user-agent", user_agent.parse()?);
@@ -504,7 +517,29 @@ async fn cable_client(
     }
     let mut seen = HashSet::new();
     let mut confirms = 0;
-    while let Some(msg) = rx.next().await {
+    let presence = subs.iter().find(|s| s.contains("PresenceChannel")).cloned();
+    let mut refresh_timer = match (refresh, &presence) {
+        (Some((period, phase)), Some(_)) => Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs_f64(period * phase),
+            Duration::from_secs_f64(period),
+        )),
+        _ => None,
+    };
+    loop {
+        let msg = match refresh_timer.as_mut() {
+            Some(timer) => tokio::select! {
+                m = rx.next() => m,
+                _ = timer.tick() => {
+                    let data = json!({"action": "refresh"}).to_string();
+                    let command = json!({"command": "message", "identifier": presence.as_deref().unwrap_or_default(), "data": data});
+                    tx.send(WsMessage::text(command.to_string())).await?;
+                    delivery.refreshes.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            },
+            None => rx.next().await,
+        };
+        let Some(msg) = msg else { break };
         if stop.load(Ordering::Relaxed) {
             break;
         }
@@ -532,6 +567,10 @@ fn on_text(text: &str, subscriptions: usize, confirms: &mut usize, seen: &mut Ha
         }
         return;
     }
+    if is_unread_notice(text) {
+        delivery.unread_frames.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     for seq in markers(text) {
         if !seen.insert(seq) {
             continue;
@@ -545,6 +584,37 @@ fn on_text(text: &str, subscriptions: usize, confirms: &mut usize, seen: &mut Ha
         let e = got.entry(seq).or_insert((0, now));
         e.0 += 1;
         e.1 = now;
+    }
+}
+
+/// The Origin a browser sends to `addr`: without the default port, which Rails also leaves out of the base URL it
+/// compares Origin with (`Origin: http://host:80` is refused).
+fn origin_for(addr: &str) -> String {
+    format!("http://{}", addr.strip_suffix(":80").unwrap_or(addr))
+}
+
+/// An UnreadRoomsChannel notice (`{"roomId":..,"at":..}`, in any key order), which carries no marker. A streamed
+/// page fragment is a JSON string, where neither an object opening nor an unescaped `"roomId":` can appear.
+fn is_unread_notice(text: &str) -> bool {
+    text.contains(r#""message":{"#) && text.contains(r#""roomId":"#)
+}
+
+/// `--sessions` lines: `cookie<TAB>identifier<TAB>identifier...`, one person each; blank lines are skipped.
+fn parse_sessions(text: &str) -> Vec<(String, Vec<String>)> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut parts = l.split('\t');
+            (parts.next().unwrap_or_default().to_string(), parts.map(str::to_string).collect())
+        })
+        .collect()
+}
+
+/// Client n's cookie and subscriptions: line n % lines of `--sessions`, or the `--cookie` user's when there are none.
+fn session_for(sessions: &[(String, Vec<String>)], n: usize, cookie: &str, subs: &[String]) -> (String, Vec<String>) {
+    match sessions.get(n % sessions.len().max(1)) {
+        Some((c, s)) => (c.clone(), s.clone()),
+        None => (cookie.to_string(), subs.to_vec()),
     }
 }
 
@@ -572,7 +642,8 @@ async fn deflate_cable_client(
     let request = format!(
         "GET /cable HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
          Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: actioncable-v1-json, actioncable-unsupported\r\n\
-         Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\nOrigin: http://{addr}\r\nCookie: {cookie}\r\n\r\n"
+         Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\nOrigin: {origin}\r\nCookie: {cookie}\r\n\r\n",
+        origin = origin_for(&addr)
     );
     write.write_all(request.as_bytes()).await?;
     let mut reader = tokio::io::BufReader::with_capacity(16 * 1024, read);
@@ -764,14 +835,35 @@ async fn cable(a: &Args) -> Res<Value> {
         json!({"channel": "UnreadRoomsChannel"}).to_string(),
         json!({"channel": "HeartbeatChannel"}).to_string(),
     ];
-    for s in a.get("streams").split(',').filter(|s| !s.is_empty()) {
+    for s in a.opt("streams").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
         let (channel, name) = s.split_once('|').unwrap_or(("Turbo::StreamsChannel", s));
         subs.push(json!({"channel": channel, "signed_stream_name": name}).to_string());
+    }
+    // `--sessions FILE`: one line per person, `cookie<TAB>identifier<TAB>identifier...`, so that N clients
+    // are N people (each with their own memberships, unread stream and user stream) instead of N tabs
+    // of the `--cookie` user. Client n uses line n % lines.
+    let sessions = match a.opt("sessions") {
+        Some(path) => parse_sessions(&std::fs::read_to_string(path)?),
+        None => Vec::new(),
+    };
+    if a.opt("sessions").is_some() && sessions.is_empty() {
+        return Err("--sessions has no sessions".into());
+    }
+    if let Some((_, first)) = sessions.first() {
+        subs = first.clone();
+    }
+    // `--refresh-secs S`: send PresenceChannel#refresh every S seconds, as presence_controller.js does
+    // every 50 while the page is visible. 0 (the default) sends none.
+    let refresh_secs: f64 = a.num("refresh-secs", 0.0);
+    if deflate && refresh_secs > 0.0 {
+        return Err("--refresh-secs is not supported with --deflate".into());
     }
 
     let delivery = Arc::new(Delivery {
         sent: Mutex::new(HashMap::new()),
         got: Mutex::new(HashMap::new()),
+        unread_frames: AtomicU64::new(0),
+        refreshes: AtomicU64::new(0),
         per_client: Mutex::new(hist()),
         receipts: AtomicU64::new(0),
         wire_bytes: AtomicU64::new(0),
@@ -789,10 +881,11 @@ async fn cable(a: &Args) -> Res<Value> {
     for n in 0..clients {
         let permit = gate.clone().acquire_owned().await?;
         let source = (!sources.is_empty()).then(|| sources[n % sources.len()]);
+        let (client_cookie, client_subs) = session_for(&sessions, n, &cookie, &subs);
         let (addr, cookie, subs, confirmed, connected, stop, delivery, failed) = (
             addr.clone(),
-            cookie.clone(),
-            subs.clone(),
+            client_cookie,
+            client_subs,
             confirmed.clone(),
             connected.clone(),
             stop.clone(),
@@ -805,7 +898,9 @@ async fn cable(a: &Args) -> Res<Value> {
             let task = if deflate {
                 tokio::spawn(deflate_cable_client(addr, source, cookie, subs, confirmed, connected, stop, delivery))
             } else {
-                tokio::spawn(cable_client(addr, source, cookie, subs, confirmed, connected, stop, delivery))
+                // Browsers aren't in step: each client's refresh timer starts at its own point of the period.
+                let refresh = (refresh_secs > 0.0).then(|| (refresh_secs, ((n as f64) * 0.618_034).fract()));
+                tokio::spawn(cable_client(addr, source, cookie, subs, confirmed, connected, stop, delivery, refresh))
             };
             // Release the permit once this client has connected (or failed).
             let until = Instant::now() + Duration::from_secs(30);
@@ -950,6 +1045,9 @@ async fn cable(a: &Args) -> Res<Value> {
         "failed": failed.load(Ordering::Relaxed),
         "connect_secs": (connect_secs * 100.0).round() / 100.0,
         "subscriptions_per_client": subs.len(),
+        "people": if sessions.is_empty() { 1 } else { sessions.len().min(clients) },
+        "unread_frames": delivery.unread_frames.load(Ordering::Relaxed),
+        "refreshes": delivery.refreshes.load(Ordering::Relaxed),
         "latency": latency,
         "throughput": throughput,
     }))
@@ -1172,6 +1270,139 @@ mod validation_integration_tests {
         assert_eq!(result["validation"], "route-contract-v1");
     }
 }
+#[cfg(test)]
+mod cable_client_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    #[test]
+    fn origin_leaves_out_only_the_default_port() {
+        assert_eq!(origin_for("campfire:80"), "http://campfire");
+        assert_eq!(origin_for("127.0.0.1:3000"), "http://127.0.0.1:3000");
+        assert_eq!(origin_for("campfire:8080"), "http://campfire:8080");
+        assert_eq!(origin_for("[::1]:80"), "http://[::1]");
+    }
+
+    #[test]
+    fn sessions_are_one_person_per_line() {
+        let text = "session_token=a%3D--1\t{\"channel\":\"PresenceChannel\",\"room_id\":1}\t{\"channel\":\"HeartbeatChannel\"}\n\n\
+                    session_token=b%3D--2\t{\"channel\":\"UnreadRoomsChannel\"}\n";
+        let sessions = parse_sessions(text);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].0, "session_token=a%3D--1");
+        assert_eq!(sessions[0].1, vec![r#"{"channel":"PresenceChannel","room_id":1}"#, r#"{"channel":"HeartbeatChannel"}"#]);
+        assert_eq!(sessions[1].0, "session_token=b%3D--2");
+        assert_eq!(sessions[1].1, vec![r#"{"channel":"UnreadRoomsChannel"}"#]);
+        assert!(parse_sessions("\n \n").is_empty());
+    }
+
+    #[test]
+    fn each_client_takes_its_own_session_in_turn() {
+        let sessions = parse_sessions("a\tsa\nb\tsb1\tsb2\n");
+        let tab = vec!["shared".to_string()];
+        assert_eq!(session_for(&sessions, 0, "user", &tab), ("a".into(), vec!["sa".into()]));
+        assert_eq!(session_for(&sessions, 1, "user", &tab), ("b".into(), vec!["sb1".into(), "sb2".into()]));
+        assert_eq!(session_for(&sessions, 2, "user", &tab), ("a".into(), vec!["sa".into()]));
+        assert_eq!(session_for(&[], 5, "user", &tab), ("user".into(), tab.clone()));
+    }
+
+    #[test]
+    fn unread_notices_are_told_from_streamed_html() {
+        assert!(is_unread_notice(r#"{"identifier":"{\"channel\":\"UnreadRoomsChannel\"}","message":{"roomId":1,"at":1.5}}"#));
+        assert!(is_unread_notice(r#"{"identifier":"{\"channel\":\"UnreadRoomsChannel\"}","message":{"at":1.5,"roomId":1}}"#));
+        assert!(!is_unread_notice(r#"{"identifier":"x","message":"<turbo-stream>{\"roomId\":1}</turbo-stream>"}"#));
+        assert!(!is_unread_notice(r#"{"type":"ping","message":1}"#));
+    }
+
+    // One client against a local Action Cable stand-in: it must send the session's cookie and an Origin without
+    // the default port, count one person's confirmations, an unread notice and a marked message, and send
+    // PresenceChannel#refresh on its timer with the presence identifier.
+    // The handshake callback's error type is tungstenite's, not ours to shrink.
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn a_client_is_its_session_and_refreshes_its_presence() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let presence = r#"{"channel":"PresenceChannel","room_id":1}"#.to_string();
+        let unread = r#"{"channel":"UnreadRoomsChannel"}"#.to_string();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let headers = Arc::new(Mutex::new(Vec::new()));
+            let seen = headers.clone();
+            let ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, mut resp: Response| {
+                for name in ["cookie", "origin"] {
+                    seen.lock().unwrap().push(req.headers()[name].to_str().unwrap().to_string());
+                }
+                resp.headers_mut().insert("sec-websocket-protocol", "actioncable-v1-json".parse().unwrap());
+                Ok(resp)
+            })
+            .await
+            .unwrap();
+            let (mut tx, mut rx) = ws.split();
+            let mut subscribed = Vec::new();
+            let mut refreshes = Vec::new();
+            while let Some(Ok(WsMessage::Text(text))) = rx.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let identifier = command["identifier"].as_str().unwrap().to_string();
+                match command["command"].as_str().unwrap() {
+                    "subscribe" => {
+                        subscribed.push(identifier.clone());
+                        let confirm = json!({"identifier": identifier, "type": "confirm_subscription"});
+                        tx.send(WsMessage::text(confirm.to_string())).await.unwrap();
+                        if subscribed.len() == 2 {
+                            let notice = json!({"identifier": subscribed[1], "message": {"roomId": 1, "at": 1.5}});
+                            tx.send(WsMessage::text(notice.to_string())).await.unwrap();
+                            let marked = json!({"identifier": subscribed[0], "message": "<turbo-stream>fanout bmk7z</turbo-stream>"});
+                            tx.send(WsMessage::text(marked.to_string())).await.unwrap();
+                        }
+                    }
+                    "message" => {
+                        refreshes.push((identifier, command["data"].as_str().unwrap().to_string()));
+                        if refreshes.len() == 2 {
+                            break;
+                        }
+                    }
+                    other => panic!("unexpected command {other}"),
+                }
+            }
+            tx.send(WsMessage::Close(None)).await.ok();
+            (headers.lock().unwrap().clone(), subscribed, refreshes)
+        });
+
+        let delivery = Arc::new(Delivery {
+            sent: Mutex::new(HashMap::new()),
+            got: Mutex::new(HashMap::new()),
+            per_client: Mutex::new(hist()),
+            receipts: AtomicU64::new(0),
+            wire_bytes: AtomicU64::new(0),
+            unread_frames: AtomicU64::new(0),
+            refreshes: AtomicU64::new(0),
+        });
+        let (confirmed, connected) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let client = cable_client(
+            addr.clone(),
+            None,
+            "session_token=person-7".into(),
+            vec![presence.clone(), unread.clone()],
+            confirmed.clone(),
+            connected.clone(),
+            Arc::new(AtomicBool::new(false)),
+            delivery.clone(),
+            Some((0.05, 0.0)),
+        );
+        tokio::time::timeout(Duration::from_secs(10), client).await.unwrap().unwrap();
+        let (headers, subscribed, refreshes) = server.await.unwrap();
+
+        assert_eq!(headers, vec!["session_token=person-7".to_string(), format!("http://{addr}")]);
+        assert_eq!(subscribed, vec![presence.clone(), unread]);
+        assert_eq!(confirmed.load(Ordering::Relaxed), 1);
+        assert_eq!(delivery.unread_frames.load(Ordering::Relaxed), 1);
+        assert_eq!(delivery.receipts.load(Ordering::Relaxed), 1);
+        assert_eq!(refreshes, vec![(presence.clone(), r#"{"action":"refresh"}"#.to_string()); 2]);
+        assert!(delivery.refreshes.load(Ordering::Relaxed) >= 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::valid_message_post;
