@@ -34,7 +34,13 @@ its persistent connection's foreign-commit version with its local write epoch. S
 do not invalidate a committed snapshot. Observer failures bypass the optional cache.
 
 A page-cache miss must also avoid stale nested HTML after foreign SQL edits that leave record
-timestamps unchanged. Rails disables fragment caching while rendering these misses; Laravel
+timestamps unchanged. Rails retains native ERB collection and Jbuilder caching in a separate
+64 MiB memory store per worker, keyed by the pre-authentication epoch, origin, mount path,
+format, locale and viewer/session context. HTML and stream fragments additionally isolate
+the raw CSRF secret. All request methods capture the epoch; detached broadcasts, whose
+renderers do not run authentication callbacks, render without fragment caching. Shared
+Rails.cache and class-level rate-limit stores stay unchanged. Sixteen fixed render locks
+collapse concurrent cold page misses without an unbounded per-key lock map. Laravel
 and Elixir bypass their message/boost fragment memoization for the captured response. Elixir
 also namespaces native fallback fragments by the pre-render epoch and request host, including
 conditional requests and when whole-response caching is disabled; its existing store has a
