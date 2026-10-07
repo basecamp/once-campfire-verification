@@ -8,6 +8,9 @@ if ARGV.first == "cable"
     raise "Unsuccessful Cable messages: #{sample}" unless posted.positive? && sample.fetch("post_attempts") == posted && sample.fetch("post_errors").zero? && sample.fetch("complete") == posted
   end
 else
-  raise "Invalid benchmark sample: #{value}" unless value.fetch("errors").zero? && value.fetch("invalid_responses").zero? && value.fetch("validation") == "route-contract-v1" && value.fetch("ok") > 0 && value.fetch("statuses") == { "200" => value.fetch("ok") }
+  samples = value["profile"] == "mixed-read-write-v1" ? [value, value.fetch("writer")] : [value]
+  samples.each do |sample|
+    raise "Invalid benchmark sample: #{sample}" unless sample.fetch("errors").zero? && sample.fetch("invalid_responses").zero? && sample.fetch("validation") == "route-contract-v1" && sample.fetch("ok") > 0 && sample.fetch("statuses") == { "200" => sample.fetch("ok") }
+  end
 end
 puts JSON.generate(value)

@@ -5,6 +5,7 @@
 //!   loadgen scrape --base URL --cookie C --room ID              -> csrf token, stream names, assets
 //!   loadgen http   --base URL --cookie C --path P --conc N --duration S
 //!                  [--post-room ID --csrf T]                     -> latency/throughput
+//!                  [--mixed-write-rate N --mixed-write-room ID --mixed-write-validate FILE --mixed-write-audit FILE]
 //!   loadgen cable  --base URL --cookie C --room ID --csrf T --clients N [--streams a,b,c]
 //!                  [--sources 127.0.0.2,127.0.0.3 --hold-secs 60 --deflate 1]
 //!                  [--latency-msgs 30 --interval-ms 200 --tput-secs 15 --posters 4]
@@ -261,6 +262,31 @@ fn message_request(cookie: &str, csrf: &str, body_text: &str) -> (Vec<(&'static 
 }
 
 async fn http_load(a: &Args) -> Res<Value> {
+    let start = Instant::now();
+    let Some(rate) = a.opt("mixed-write-rate") else { return http_window(a, start).await };
+    let rate: u64 = rate.parse().map_err(|_| "invalid mixed write rate")?;
+    if !(1..=100).contains(&rate) || a.opt("post-room").is_some() || a.opt("validate").is_none() {
+        return Err("mixed reads require validation and a write rate from 1 to 100 per second".into());
+    }
+    let mut writer = a.0.clone();
+    writer.remove("mixed-write-rate");
+    writer.remove("requests");
+    writer.remove("trace");
+    writer.insert("post-room".into(), a.opt("mixed-write-room").ok_or("missing mixed write room")?);
+    writer.insert("validate".into(), a.opt("mixed-write-validate").ok_or("missing mixed write contract")?);
+    writer.insert("audit-writes".into(), a.opt("mixed-write-audit").ok_or("missing mixed write audit")?);
+    writer.insert("conc".into(), "1".into());
+    writer.insert("interval-ms".into(), 1000u64.div_ceil(rate).to_string());
+    let writer = Args(writer);
+    let (reads, writes) = tokio::join!(http_window(a, start), http_window(&writer, start));
+    let mut reads = reads?;
+    reads["writer"] = writes?;
+    reads["profile"] = json!("mixed-read-write-v1");
+    reads["writer_rate_limit"] = json!(rate);
+    Ok(reads)
+}
+
+async fn http_window(a: &Args, start: Instant) -> Res<Value> {
     let addr = host_port(&a.get("base"));
     let cookie = a.opt("cookie").unwrap_or_default();
     let path = a.opt("path").unwrap_or_else(|| "/".into());
@@ -274,6 +300,10 @@ async fn http_load(a: &Args) -> Res<Value> {
     let trace_path = a.opt("trace");
     let validation_path = a.opt("validate");
     let audit_path = a.opt("audit-writes");
+    let interval = a.num("interval-ms", 0u64);
+    if interval > 0 && (conc != 1 || post_room.is_none() || audit_path.is_none() || validation_path.is_none()) {
+        return Err("paced writes require one POST client, validation and an audit".into());
+    }
     if audit_path.is_some() && (validation_path.is_none() || post_room.is_none()) {
         return Err("--audit-writes requires POST and --validate".into());
     }
@@ -288,7 +318,6 @@ async fn http_load(a: &Args) -> Res<Value> {
     let successful = Arc::new(AtomicU64::new(0));
     let invalid_reasons = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
     let bytes_total = Arc::new(AtomicU64::new(0));
-    let start = Instant::now();
     let deadline = start + duration;
     let mut tasks = Vec::new();
     for _ in 0..conc {
@@ -311,7 +340,16 @@ async fn http_load(a: &Args) -> Res<Value> {
             let mut invalid_reason = None;
             let mut local_trace = Vec::new();
             let mut local_audit = Vec::new();
+            let mut next_issue = start;
             while Instant::now() < deadline && issued.fetch_add(1, Ordering::Relaxed) < limit {
+                if interval > 0 {
+                    tokio::time::sleep_until(next_issue.into()).await;
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    // Slow responses never produce a catch-up burst.
+                    next_issue = Instant::now() + Duration::from_millis(interval);
+                }
                 if conn.is_none() {
                     match connect(&addr).await {
                         Ok(c) => conn = Some(c),
@@ -1115,6 +1153,106 @@ async fn main() {
 mod validation_integration_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn mixed_writer_is_paced_validated_and_audited_separately() {
+        let directory = std::env::temp_dir().join(format!("campfire-mixed-{}", nonce()));
+        std::fs::create_dir(&directory).unwrap();
+        let read = directory.join("read.json");
+        let write = directory.join("write.json");
+        let audit = directory.join("audit.jsonl");
+        std::fs::write(&read, json!({"kind":"up","content_type":"text/plain","required":["OK"]}).to_string()).unwrap();
+        std::fs::write(&write, json!({"kind":"post_message","content_type":"text/vnd.turbo-stream.html","required":[]}).to_string())
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let seen = arrivals.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                let head = String::from_utf8(request).unwrap();
+                let (body, content_type) = if head.starts_with("POST ") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|v| v.parse::<usize>().ok()))
+                        .unwrap();
+                    let mut payload = vec![0; length];
+                    socket.read_exact(&mut payload).await.unwrap();
+                    let token =
+                        String::from_utf8(payload).unwrap().split('&').next().unwrap().split_once('=').unwrap().1.replace("%20", " ");
+                    let id = {
+                        let mut times = seen.lock().unwrap();
+                        times.push(Instant::now());
+                        times.len()
+                    };
+                    let rendered = if id == 2 { "wrong body" } else { &token };
+                    (
+                        format!(
+                            "<turbo-stream action=\"append\" target=\"messages_room_2\"><template><div data-message-id=\"{id}\">{rendered}</div></template></turbo-stream>"
+                        ),
+                        "text/vnd.turbo-stream.html",
+                    )
+                } else {
+                    ("OK".into(), "text/plain")
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let args = Args(HashMap::from([
+            ("base".into(), format!("http://{addr}")),
+            ("path".into(), "/up".into()),
+            ("validate".into(), read.to_string_lossy().into_owned()),
+            ("conc".into(), "1".into()),
+            ("duration".into(), "0.25".into()),
+            ("requests".into(), "4".into()),
+            ("gzip".into(), "0".into()),
+            ("mixed-write-rate".into(), "10".into()),
+            ("mixed-write-room".into(), "2".into()),
+            ("mixed-write-validate".into(), write.to_string_lossy().into_owned()),
+            ("mixed-write-audit".into(), audit.to_string_lossy().into_owned()),
+        ]));
+        let result = http_load(&args).await.unwrap();
+        server.abort();
+        assert_eq!(result["ok"], 4);
+        assert_eq!(result["invalid_responses"], 0);
+        assert_eq!(result["writer"]["ok"], 2);
+        assert_eq!(result["writer"]["invalid_responses"], 1);
+        let lines = std::fs::read_to_string(audit).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        for line in lines.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            assert!(row["token"].as_str().unwrap().starts_with("bench write "));
+            assert_ne!(row["id"], 2);
+        }
+        let times = arrivals.lock().unwrap();
+        assert_eq!(times.len(), 3);
+        assert!(times.windows(2).all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_millis(95)));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_writer_rejects_missing_contracts_and_unbounded_rates() {
+        for rate in ["0", "101", "bad", "10"] {
+            let args = Args(HashMap::from([("mixed-write-rate".into(), rate.into()), ("validate".into(), "unused.json".into())]));
+            assert!(http_load(&args).await.is_err());
+        }
+    }
 
     #[tokio::test]
     async fn intermittent_200_error_page_invalidates_a_loaded_run() {

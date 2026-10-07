@@ -16,6 +16,18 @@ class CheckSampleTest < Minitest::Test
     assert status.success?, errors
     assert_equal good, JSON.parse(output)
   end
+  def test_mixed_profile_cannot_hide_failed_or_missing_writer_responses
+    sample = { "errors" => 0, "invalid_responses" => 0, "validation" => "route-contract-v1", "ok" => 8, "statuses" => { "200" => 8 } }
+    mixed = sample.merge("profile" => "mixed-read-write-v1", "writer" => sample)
+    bad = [mixed.reject { |key, _| key == "writer" }, mixed.merge("writer" => sample.merge("invalid_responses" => 1)), mixed.merge("writer" => sample.merge("errors" => 1))]
+    bad.each do |value|
+      _, _, status = Open3.capture3(RbConfig.ruby, File.join(__dir__, "check_sample.rb"), stdin_data: JSON.generate(value))
+      refute status.success?
+    end
+    _, errors, status = Open3.capture3(RbConfig.ruby, File.join(__dir__, "check_sample.rb"), stdin_data: JSON.generate(mixed))
+    assert status.success?, errors
+  end
+
   def test_rejects_cable_errors_and_partial_fanout
     sample = { "post_attempts" => 4, "post_errors" => 0, "complete" => 4 }
     good = { "clients" => 2, "ready" => 2, "failed" => 0, "latency" => sample.merge("messages" => 4), "throughput" => sample.merge("posted" => 4) }

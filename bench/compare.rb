@@ -11,7 +11,7 @@ repo = File.expand_path("..", __dir__)
 workspace = File.dirname(repo)
 work = File.join(repo, "tmp/bench")
 options = { apps: "rails,django,laravel,express,elixir,go,rust,c", rounds: 3, duration: 8, concurrencies: "16", port: 25130,
-  workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false,
+  workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false, mixed_write_rate: 0,
   loadgen: ENV.fetch("LOADGEN", File.join(repo, "loadgen/target/release/loadgen")),
   env_file: ENV.fetch("BENCH_ENV_FILE", File.join(repo, "fixtures/default/reference.env")),
   output: File.join(work, "results", "#{Time.now.utc.strftime('%Y%m%d-%H%M%S')}-#{Process.pid}"), cpus: "8-11", client_cpus: "12-15",
@@ -34,6 +34,12 @@ raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.
 selected_routes = options[:routes].split(",")
 raise "unknown or empty route selection" unless !selected_routes.empty? && (selected_routes - %w[room_show messages_page sidebar search avatar static_css up post_message]).empty?
 raise "duration and concurrencies must be positive" unless options[:duration].positive? && !options[:concurrencies].split(",").empty? && options[:concurrencies].split(",").all? { |value| Integer(value).positive? }
+raise "mixed write rate must be between 0 and 100" unless (0..100).cover?(options[:mixed_write_rate])
+mixed = options[:mixed_write_rate].positive?
+if mixed
+  selected_routes &= %w[room_show messages_page sidebar search]
+  raise "mixed profile requires a read route" if selected_routes.empty?
+end
 runtimes = apps.to_h { |app| [app, app == "express-bun" ? "express" : app] }
 env_name = ->(app) { app.upcase.tr("-", "_") }
 labels = JSON.parse(File.read(File.join(options[:seed], "labels.json")))
@@ -68,7 +74,8 @@ results = []
 metadata = { verification_revision: run("git", "-C", repo, "rev-parse", "HEAD").strip, response_validation: "route-contract-v1", started_at: Time.now.utc.iso8601, seed_sha256: original_seed_sha, server_cpus: options[:cpus],
   client_cpus: options[:client_cpus], network: "host", gzip: true, duration: options[:duration],
   concurrencies: options[:concurrencies], rounds: options[:rounds], loadgen_sha256: Digest::SHA256.file(options[:loadgen]).hexdigest,
-  routes: options[:routes], images: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
+  routes: selected_routes.join(","), profile: mixed ? "mixed-read-write-v1" : "read-and-post-v1",
+  mixed_writer: mixed ? {clients: 1, maximum_writes_per_second: options[:mixed_write_rate], room: write_room, catch_up: false} : nil, images: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
 sql = ->(db, query) do
   readonly = query.match?(/\ASELECT/i)
   output = run("sqlite3", "-cmd", ".timeout 10000", *(readonly ? ["-readonly"] : []), "-json", db, query)
@@ -149,12 +156,12 @@ begin
       prepared = BenchmarkContracts.prepare(base, cookie, db, labels, scrape.fetch("css"), File.join(data, "contracts"))
       contracts = prepared.fetch(:contracts)
       preflight = prepared.fetch(:preflight)
-      row = { app: app, round: iteration + 1, preflight: preflight, http: [], load_start: File.read("/proc/loadavg").strip }
+      row = { app: app, round: iteration + 1, preflight: preflight, http: [], mixed_http: [], load_start: File.read("/proc/loadavg").strip }
       acknowledged_writes = 0
       write_audits = []
       unless options[:preflight]
         routes.each do |name, path|
-          next unless options[:routes].split(",").include?(name)
+          next unless selected_routes.include?(name)
           args = (path ? ["--path", path] : ["--post-room", write_room.to_s, "--csrf", csrf]) + ["--validate", contracts.fetch(name)]
           warm_audit = []
           unless path
@@ -162,8 +169,19 @@ begin
             write_audits << audit
             warm_audit = ["--audit-writes", audit]
           end
-          warmup = lg.call("http", "--base", base, "--cookie", cookie, *args, *warm_audit, "--conc", "4", "--duration", "2")
+          mixed_args = ->(phase) do
+            next [] unless mixed
+            audit = File.join(data, "mixed-#{name}-#{phase}.jsonl")
+            write_audits << audit
+            ["--mixed-write-rate", options[:mixed_write_rate].to_s, "--mixed-write-room", write_room.to_s,
+              "--mixed-write-validate", contracts.fetch("post_message"), "--mixed-write-audit", audit, "--csrf", csrf]
+          end
+          warmup = lg.call("http", "--base", base, "--cookie", cookie, *args, *warm_audit, *mixed_args.call("warmup"), "--conc", "4", "--duration", "2")
           check_sample.call(name, warmup)
+          if mixed
+            check_sample.call("#{name} warmup writer", warmup.fetch("writer"))
+            acknowledged_writes += warmup.fetch("writer").fetch("ok")
+          end
           acknowledged_writes += warmup.fetch("ok") unless path
           options[:concurrencies].split(",").each do |concurrency|
             timed_audit = []
@@ -172,10 +190,14 @@ begin
               write_audits << audit
               timed_audit = ["--audit-writes", audit]
             end
-            value = lg.call("http", "--base", base, "--cookie", cookie, *args, *timed_audit, "--conc", concurrency, "--duration", options[:duration].to_s)
+            value = lg.call("http", "--base", base, "--cookie", cookie, *args, *timed_audit, *mixed_args.call(concurrency), "--conc", concurrency, "--duration", options[:duration].to_s)
             check_sample.call(name, value)
             acknowledged_writes += value.fetch("ok") unless path
-            row[:http] << value.merge("route" => name)
+            if mixed
+              check_sample.call("#{name} timed writer", value.fetch("writer"))
+              acknowledged_writes += value.fetch("writer").fetch("ok")
+            end
+            row[mixed ? :mixed_http : :http] << value.merge("route" => name)
             puts "#{app} round #{iteration + 1}: #{name} #{concurrency} clients #{value.fetch('rps')} req/s"
             STDOUT.flush
           end
@@ -201,14 +223,16 @@ begin
   raise "original seed changed" unless Digest::SHA256.file(File.join(options[:seed], "db/production.sqlite3")).hexdigest == original_seed_sha
   summary = apps.to_h do |app|
     rows = results.select { |row| row[:app] == app }
-    values = %w[room_show messages_page sidebar search post_message].to_h do |name|
-      samples = rows.filter_map { |row| row[:http].find { |item| item.fetch("route") == name && item.fetch("conc") == 16 }&.fetch("rps") }
+    summary_routes = mixed ? %w[room_show messages_page sidebar search] : %w[room_show messages_page sidebar search post_message]
+    values = summary_routes.to_h do |name|
+      samples = rows.filter_map { |row| row[mixed ? :mixed_http : :http].find { |item| item.fetch("route") == name && item.fetch("conc") == 16 }&.fetch("rps") }
       [name, samples.empty? ? nil : { median_rps: median(samples), runs: samples }]
     end
     [app, values]
   end
   metadata[:complete] = true
-  write_json(File.join(options[:output], "summary.json"), metadata: metadata, results: summary)
+  write_json(File.join(options[:output], mixed ? "mixed-summary.json" : "summary.json"), metadata: metadata,
+    (mixed ? :mixed_results : :results) => summary)
   puts JSON.pretty_generate(summary)
 ensure
   remove_container(container)
