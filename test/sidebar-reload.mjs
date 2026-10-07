@@ -22,7 +22,7 @@ async function fixture(source) {
   const controller = new context.RoomsListController()
   controller.element = { loaded: pending.promise, isConnected: true, reload() { reloads++ } }
   await controller.connect()
-  return { controller, callbacks, pending, reloads: () => reloads }
+  return { controller, get callbacks() { return callbacks }, pending, reloads: () => reloads }
 }
 
 async function check(source) {
@@ -59,6 +59,18 @@ async function check(source) {
   reconnected.pending.resolve()
   await Promise.all([oldConnection, currentConnection])
   assert.equal(reconnected.reloads(), 1, "Only the latest connection may refresh after an interrupted load")
+
+  const detached = await fixture(source)
+  const detachedConnection = detached.callbacks.connected()
+  detached.controller.element.isConnected = false
+  detached.controller.disconnect()
+  detached.pending.resolve()
+  await detachedConnection
+  assert.equal(detached.reloads(), 0, "An unsubscribed controller must not reload")
+  detached.controller.element.isConnected = true
+  await detached.controller.connect()
+  await detached.callbacks.connected()
+  assert.equal(detached.reloads(), 1, "Reattaching a controller must refresh through its new subscription")
 
   const failed = await fixture(source)
   const failedConnection = failed.callbacks.connected()
