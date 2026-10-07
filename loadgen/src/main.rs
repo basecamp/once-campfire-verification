@@ -1132,7 +1132,7 @@ mod validation_integration_tests {
                 let body = if i == 3 {
                     "<!DOCTYPE html><html>Internal server error</html>"
                 } else {
-                    "<!DOCTYPE html><html><div data-message-id=\"42\">coffee</div></html>"
+                    "<!DOCTYPE html><html><div id=\"message_42\" data-message-id=\"42\"><div id=\"presentation_message_42\">coffee</div></div></html>"
                 };
                 socket
                     .write_all(
@@ -1147,7 +1147,12 @@ mod validation_integration_tests {
             }
         });
         let path = std::env::temp_dir().join(format!("campfire-validation-{}.json", nonce()));
-        std::fs::write(&path, json!({"kind":"room_show","content_type":"text/html","required":[],"message_ids":[42]}).to_string()).unwrap();
+        std::fs::write(
+            &path,
+            json!({"kind":"room_show","content_type":"text/html","required":[],"message_ids":[42],"message_content":[["coffee"]]})
+                .to_string(),
+        )
+        .unwrap();
         let args = Args(HashMap::from([
             ("base".into(), format!("http://{addr}")),
             ("path".into(), "/rooms/1".into()),

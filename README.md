@@ -17,7 +17,7 @@ cargo build --release --locked --manifest-path loadgen/Cargo.toml
 bin/benchmark --apps rails,elixir,go,rust
 ```
 
-Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE` and `C_IMAGE`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
+Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE` and `C_IMAGE`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. A process lock prevents overlapping benchmark runs. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
 
 Against a **fresh, disposable** running app:
 

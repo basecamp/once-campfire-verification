@@ -123,7 +123,7 @@ begin
       command = ["docker", "run", "-d", "--name", container, "--network", "host", "--cpuset-cpus", options[:cpus]]
       command.concat environment(config)
       command.concat mounts(File.join(data, "db") => "/rails/storage/db", File.join(data, "files") => "/rails/storage/files", File.join(data, "logs") => "/rails/storage/logs")
-      command << image
+      command << image_id
       run(*command)
       client = BenchmarkHTTPClient.new(base)
       deadline = clock + 90

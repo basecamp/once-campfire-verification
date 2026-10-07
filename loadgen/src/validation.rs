@@ -10,10 +10,16 @@ pub struct Validator {
     kind: String,
     content_type: String,
     message_ids: Option<Vec<u64>>,
-    message_content: Option<Vec<String>>,
+    message_content: Option<Vec<Vec<String>>>,
     required: Vec<String>,
     exact_body: Option<Vec<u8>>,
     ids: Regex,
+    identity: Regex,
+    presentation: Regex,
+    divs: Regex,
+    tags: Regex,
+    words: Regex,
+    closure: Regex,
     // Exact byte equality reuses validation of an immutable wire representation. No hashes,
     // unchecked samples, or cross-route entries; randomized pages are checked in full.
     valid_bodies: Vec<(String, String, Bytes)>,
@@ -39,7 +45,7 @@ impl Validator {
                 v.as_array()
                     .ok_or("message_ids must be an array")?
                     .iter()
-                    .map(|v| v.as_u64().ok_or("invalid message ID"))
+                    .map(|v| v.as_u64().filter(|id| *id > 0).ok_or("invalid message ID"))
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
@@ -52,10 +58,30 @@ impl Validator {
                 v.as_array()
                     .ok_or("message_content must be an array")?
                     .iter()
-                    .map(|v| v.as_str().map(str::to_owned).ok_or("invalid message content"))
+                    .map(|v| {
+                        let tokens = v
+                            .as_array()
+                            .ok_or("message content must contain token arrays")?
+                            .iter()
+                            .map(|token| {
+                                let token = token.as_str().ok_or("invalid message content token")?;
+                                if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                    return Err("invalid message content token");
+                                }
+                                Ok(token.to_owned())
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if tokens.is_empty() {
+                            return Err("empty message content tokens");
+                        }
+                        Ok(tokens)
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
+        if ["room_show", "messages_page", "search"].contains(&kind.as_str()) && message_content.is_none() {
+            return Err("message route needs expected content");
+        }
         if message_content.as_ref().is_some_and(|content| Some(content.len()) != message_ids.as_ref().map(Vec::len)) {
             return Err("message content must match expected IDs");
         }
@@ -83,10 +109,38 @@ impl Validator {
             message_content,
             required,
             exact_body,
-            ids: Regex::new(r#"data-message-id="(\d+)""#).unwrap(),
+            ids: Regex::new(r#"<div\b[^>]*\sdata-message-id="(\d+)"[^>]*>"#).unwrap(),
+            identity: Regex::new(r#"\sid="message_([^"]+)""#).unwrap(),
+            presentation: Regex::new(r#"<div\b[^>]*\sid="presentation_message_([^"]+)"[^>]*>"#).unwrap(),
+            divs: Regex::new(r"(?i)<(/?)div\b[^>]*>").unwrap(),
+            tags: Regex::new(r"<[^>]*>").unwrap(),
+            words: Regex::new(r"[A-Za-z0-9_]+").unwrap(),
+            closure: Regex::new(r"</turbo-frame>\s*</div>\s*$").unwrap(),
             valid_bodies: Vec::new(),
             message_id: None,
         })
+    }
+
+    // Bound content to its presentation div, excluding headings, attributes and the next message.
+    fn presentation_content<'a>(&self, segment: &'a str, id: u64, opener: &str) -> Result<&'a str, &'static str> {
+        let presentation = self.presentation.captures(segment).ok_or("missing message presentation")?;
+        let identity = self.identity.captures(opener).map(|c| c[1].to_owned());
+        if presentation[1] != id.to_string() && identity.as_deref() != Some(&presentation[1]) {
+            return Err("incorrect message presentation identity");
+        }
+        let content_start = presentation.get(0).unwrap().end();
+        let mut depth = 1;
+        for tag in self.divs.captures_iter(&segment[content_start..]) {
+            if &tag[1] == "/" {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(&segment[content_start..content_start + tag.get(0).unwrap().start()]);
+                }
+            } else {
+                depth += 1;
+            }
+        }
+        Err("incomplete message presentation")
     }
 
     pub fn message_id(&self) -> Option<u64> {
@@ -143,7 +197,7 @@ impl Validator {
             let messages = self
                 .ids
                 .captures_iter(text)
-                .map(|c| c[1].parse::<u64>().map(|id| (id, c.get(0).unwrap().end())))
+                .map(|c| c[1].parse::<u64>().ok().filter(|id| *id > 0).map(|id| (id, c.get(0).unwrap())).ok_or("invalid message ID"))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| "invalid message ID")?;
             let ids = messages.iter().map(|(id, _)| *id).collect::<Vec<_>>();
@@ -153,10 +207,20 @@ impl Validator {
                 return Err("incorrect message window");
             }
             if let Some(expected) = &self.message_content {
-                for (i, marker) in expected.iter().enumerate() {
-                    let end = messages.get(i + 1).map_or(text.len(), |(_, end)| *end);
-                    if !text[messages[i].1..end].contains(marker) {
-                        return Err("missing seeded message content");
+                for (i, tokens) in expected.iter().enumerate() {
+                    let (id, opener) = messages[i];
+                    let end = messages.get(i + 1).map_or(text.len(), |(_, opener)| opener.start());
+                    let segment = &text[opener.end()..end];
+                    if self.kind == "messages_page" && !self.closure.is_match(segment) {
+                        return Err("incomplete paginated message");
+                    }
+                    let content = self.presentation_content(segment, id, opener.as_str())?;
+                    let plain = self.tags.replace_all(content, " ");
+                    let mut actual = self.words.find_iter(&plain);
+                    for token in tokens {
+                        if !actual.by_ref().any(|word| word.as_str() == token) {
+                            return Err("missing seeded message content");
+                        }
                     }
                 }
             }
@@ -193,7 +257,12 @@ mod tests {
 
     fn validator(kind: &str) -> Validator {
         let content_type = if kind == "post_message" { "text/vnd.turbo-stream.html" } else { "text/html" };
-        Validator::from_value(json!({"kind":kind,"content_type":content_type,"message_ids":if kind=="room_show" {json!([42])} else {Value::Null},"required":[]})).unwrap()
+        let mut contract = json!({"kind":kind,"content_type":content_type,"required":[]});
+        if kind == "room_show" {
+            contract["message_ids"] = json!([42]);
+            contract["message_content"] = json!([["coffee"]]);
+        }
+        Validator::from_value(contract).unwrap()
     }
     fn headers(content_type: &str, gzip: bool) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -203,20 +272,28 @@ mod tests {
         }
         h
     }
+    fn message(id: u64, body: &str) -> String {
+        format!(
+            r#"<div id="message_client-{id}" data-message-id="{id}"><h3>Heading</h3><turbo-frame id="edit_message_client-{id}"><div id="presentation_message_client-{id}"><p>{body}</p></div></turbo-frame></div>"#
+        )
+    }
+    fn page(body: &str) -> Bytes {
+        Bytes::from(format!("<!DOCTYPE html><html>{body}</html>"))
+    }
+    fn messages_validator() -> Validator {
+        Validator::from_value(json!({"kind":"messages_page","content_type":"text/html",
+            "message_ids":[42,43],"message_content":[["001","Coffee","machine","is","fixed"],["002","meeting"]],"required":[]}))
+        .unwrap()
+    }
     #[test]
     fn rejects_200_error_pages_truncated_pages_and_wrong_message_windows() {
         let mut v = validator("room_show");
         let h = headers("text/html", false);
-        let good = Bytes::from_static(b"<!DOCTYPE html><html><article data-message-id=\"42\">coffee</article></html>");
+        let good = page(&message(42, "coffee"));
         assert!(v.check(200, &h, &good, None).is_ok());
         assert!(v.check(200, &h, &good, None).is_ok());
-        for bad in [
-            "error",
-            "<!DOCTYPE html><html><article data-message-id=\"42\">coffee",
-            "<!DOCTYPE html><html><article data-message-id=\"43\">coffee</article></html>",
-            "<!DOCTYPE html><html></html>",
-        ] {
-            assert!(v.check(200, &h, &Bytes::from(bad), None).is_err());
+        for bad in [Bytes::from_static(b"error"), Bytes::from(message(42, "coffee")), page(&message(43, "coffee")), page("")] {
+            assert!(v.check(200, &h, &bad, None).is_err());
         }
         assert!(v.check(500, &h, &good, None).is_err());
         assert!(v.check(200, &headers("text/plain", false), &good, None).is_err());
@@ -226,7 +303,7 @@ mod tests {
         let mut v = validator("room_show");
         let h = headers("text/html", true);
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        gz.write_all(b"<!DOCTYPE html><html><article data-message-id=\"42\">coffee</article></html>").unwrap();
+        gz.write_all(&page(&message(42, "coffee"))).unwrap();
         let bytes = gz.finish().unwrap();
         assert!(v.check(200, &h, &Bytes::from(bytes.clone()), None).is_ok());
         let mut corrupt = bytes.clone();
@@ -238,30 +315,69 @@ mod tests {
         trailing.push(0);
         assert!(v.check(200, &h, &Bytes::from(trailing), None).is_err());
     }
-
     #[test]
-    fn checks_each_seeded_body_and_rejects_overflowing_message_ids() {
-        let mut v = Validator::from_value(json!({"kind":"messages_page","content_type":"text/html",
-            "message_ids":[42,43],"message_content":["coffee","meeting"],"required":[]}))
-        .unwrap();
+    fn checks_all_seeded_words_and_ordinals_in_order_in_each_presentation() {
+        let mut v = messages_validator();
         let h = headers("text/html", false);
-        let good = Bytes::from_static(b"<article data-message-id=\"42\">coffee</article><article data-message-id=\"43\">meeting</article>");
-        assert!(v.check(200, &h, &good, None).is_ok());
-        let bad = Bytes::from_static(b"<article data-message-id=\"42\"></article><article data-message-id=\"43\">coffee meeting</article>");
-        assert!(v.check(200, &h, &bad, None).is_err());
-        let overflow = Bytes::from_static(b"<article data-message-id=\"18446744073709551616\">coffee</article>");
-        assert!(v.check(200, &h, &overflow, None).is_err());
-        assert!(
-            Validator::from_value(json!({"kind":"messages_page","content_type":"text/html",
-            "message_ids":[42],"message_content":["coffee","meeting"],"required":[]}))
-            .is_err()
+        let first = message(42, "001. Coffee <strong>machine</strong> is fixed!");
+        let second = message(43, "002. meeting");
+        assert!(v.check(200, &h, &Bytes::from(format!("{first}{second}")), None).is_ok());
+        for body in
+            ["machine", "Coffee machine is fixed", "001. Coffee is fixed", "001. fixed is machine Coffee", "001. Coffee machines is fixed"]
+        {
+            assert!(v.check(200, &h, &Bytes::from(format!("{}{second}", message(42, body))), None).is_err(), "{body}");
+        }
+        let moved = format!("{}{}", message(42, ""), message(43, "001 Coffee machine is fixed 002 meeting"));
+        assert!(v.check(200, &h, &Bytes::from(moved), None).is_err());
+        let wrong_heading = first
+            .replace("<h3>Heading</h3>", "<h3>001 Coffee machine is fixed</h3>")
+            .replace("<p>001. Coffee <strong>machine</strong> is fixed!</p>", "<p></p>");
+        assert!(v.check(200, &h, &Bytes::from(format!("{wrong_heading}{second}")), None).is_err());
+        let attribute_only =
+            first.replace("<p>001. Coffee <strong>machine</strong> is fixed!</p>", r#"<a title="001 Coffee machine is fixed"></a>"#);
+        assert!(v.check(200, &h, &Bytes::from(format!("{attribute_only}{second}")), None).is_err());
+        let wrong_presentation = first.replace("presentation_message_client-42", "presentation_message_client-43");
+        assert!(v.check(200, &h, &Bytes::from(format!("{wrong_presentation}{second}")), None).is_err());
+    }
+    #[test]
+    fn rejects_truncated_final_pagination_message_after_all_expected_content() {
+        let mut v = messages_validator();
+        let h = headers("text/html", false);
+        let full = format!("{}{}", message(42, "001 Coffee machine is fixed"), message(43, "002 meeting"));
+        assert!(v.check(200, &h, &Bytes::from(full.clone()), None).is_ok());
+        for suffix in ["</p></div></turbo-frame></div>", "</div></turbo-frame></div>", "</turbo-frame></div>", "</div>"] {
+            assert!(v.check(200, &h, &Bytes::from(full.strip_suffix(suffix).unwrap().to_owned()), None).is_err(), "{suffix}");
+        }
+        let first = message(42, "001 Coffee machine is fixed").replace("</turbo-frame>", "");
+        assert!(v.check(200, &h, &Bytes::from(format!("{first}{}", message(43, "002 meeting"))), None).is_err());
+    }
+    #[test]
+    fn rejects_next_opening_attributes_as_missing_content_and_zero_or_overflow_ids() {
+        let mut v = messages_validator();
+        let h = headers("text/html", false);
+        let body = format!(
+            "{}{}",
+            message(42, "001 Coffee machine is"),
+            message(43, "002 meeting").replace("data-message-id", r#"title="fixed" data-message-id"#)
         );
+        assert!(v.check(200, &h, &Bytes::from(body), None).is_err());
+        let mut v = validator("room_show");
+        for id in ["0", "18446744073709551616"] {
+            let bad = page(&message(42, "coffee").replace(r#"data-message-id="42""#, &format!(r#"data-message-id="{id}""#)));
+            assert!(v.check(200, &h, &bad, None).is_err());
+        }
+        let mut post = validator("post_message");
+        let body = Bytes::from(format!("<turbo-stream><template>{}</template></turbo-stream>", message(0, "bench write unique")));
+        assert!(post.check(200, &headers("text/vnd.turbo-stream.html", false), &body, Some("bench write unique")).is_err());
     }
     #[test]
     fn post_requires_actual_message_and_per_request_body() {
         let mut v = validator("post_message");
         let h = headers("text/vnd.turbo-stream.html", false);
-        let body=Bytes::from_static(b"<turbo-stream action=\"append\"><template><article data-message-id=\"42\">bench write unique</article></template></turbo-stream>");
+        let body = Bytes::from(format!(
+            "<turbo-stream action=\"append\"><template>{}</template></turbo-stream>",
+            message(42, "bench write unique")
+        ));
         assert!(v.check(200, &h, &body, Some("bench write unique")).is_ok());
         assert!(v.check(200, &h, &body, Some("bench write different")).is_err());
         assert!(
@@ -275,8 +391,18 @@ mod tests {
         );
     }
     #[test]
-    fn invalid_validation_contract_fails_closed() {
-        assert!(Validator::from_value(json!({"kind":"room_show","content_type":"text/html","required":[]})).is_err());
-        assert!(Validator::from_value(json!({"kind":"unknown","content_type":"text/html","required":[]})).is_err());
+    fn invalid_or_thin_validation_contract_fails_closed() {
+        for contract in [
+            json!({"kind":"room_show","content_type":"text/html","required":[]}),
+            json!({"kind":"unknown","content_type":"text/html","required":[]}),
+            json!({"kind":"room_show","content_type":"text/html","message_ids":[42],"required":[]}),
+            json!({"kind":"messages_page","content_type":"text/html","message_ids":[42],"message_content":[["coffee"],["meeting"]],"required":[]}),
+            json!({"kind":"room_show","content_type":"text/html","message_ids":[0],"message_content":[["coffee"]],"required":[]}),
+            json!({"kind":"room_show","content_type":"text/html","message_ids":[42],"message_content":[[]],"required":[]}),
+            json!({"kind":"room_show","content_type":"text/html","message_ids":[42],"message_content":[[""]],"required":[]}),
+            json!({"kind":"room_show","content_type":"text/html","message_ids":[42],"message_content":["coffee"],"required":[]}),
+        ] {
+            assert!(Validator::from_value(contract).is_err());
+        }
     }
 }

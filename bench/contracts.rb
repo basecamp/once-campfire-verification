@@ -66,7 +66,7 @@ module BenchmarkContracts
         if %w[room_show messages_page search].include?(name)
           contract[:message_ids] = ids
           bodies = sql.call(database, "SELECT rowid AS id, body FROM message_search_index WHERE rowid IN (#{ids.join(',')})").to_h { |v| [v.fetch("id"), v.fetch("body")] }
-          contract[:message_content] = ids.map { |id| bodies.fetch(id).scan(/[A-Za-z0-9_]{3,}/).max_by(&:length).to_s }
+          contract[:message_content] = ids.map { |id| bodies.fetch(id).scan(/[A-Za-z0-9_]+/) }
           contract[:required] = sql.call(database, "SELECT id, client_message_id FROM messages WHERE id IN (#{ids.join(',')})").map do |v|
             markers = ["id=\"message_#{v.fetch('id')}\"", "id=\"message_#{v.fetch('client_message_id')}\""]
             markers.find { |marker| body.include?(marker) } || raise("missing message DOM identity #{v.fetch('id')}")
