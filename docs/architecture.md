@@ -35,8 +35,10 @@ do not invalidate a committed snapshot. Observer failures bypass the optional ca
 
 A page-cache miss must also avoid stale nested HTML after foreign SQL edits that leave record
 timestamps unchanged. Rails disables fragment caching while rendering these misses; Laravel
-and Elixir bypass their message/boost fragment memoization for the captured response. Django
-renders its page body directly. Go, Rust and Express namespace nested fragments by the
+and Elixir bypass their message/boost fragment memoization for the captured response. Elixir
+also namespaces native fallback fragments by the pre-render epoch and request host, including
+conditional requests and when whole-response caching is disabled; its existing store has a
+4,096-entry bound. Django renders its page body directly. Go, Rust and Express namespace nested fragments by the
 request's observed database generation. Old in-flight renders retain their old namespace,
 while all namespaces share the existing byte budget. Rust also separates fragments by origin
 because nested OpenGraph presentation depends on the request host. Native regressions target
