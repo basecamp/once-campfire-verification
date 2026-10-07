@@ -5,11 +5,11 @@ Every measured response passed its content contract, and every acknowledged HTTP
 passed the exact persisted-write audit. Current results follow the completed functional checks below.
 The run used harness revision [`d88b346`](https://github.com/basecamp/once-campfire-verification/commit/d88b3460620593bfb62e0bd1953b6462e01f230e).
 
-23 performance pull requests are confirmed merged. The useful cache work from the separately
+24 performance pull requests are confirmed merged. The useful cache work from the separately
 closed Laravel #1 is retained and credited. Merge author and committer are
 `GPT on behalf of DHH <2741+dhh@users.noreply.github.com>`; original contributor commits remain intact.
-39 proposals were reviewed across Rails, Rust, Go, Elixir, Laravel and Express; 23 merged and
-16 remain unmerged, including two closed by their authors. Django and the
+39 proposals were reviewed across Rails, Rust, Go, Elixir, Laravel and Express; 24 merged and
+15 remain unmerged, including two closed by their authors. Django and the
 public [C fork](https://github.com/basecamp/once-campfire-c) are included in the current comparison.
 
 ## Current production HTTP results
@@ -19,29 +19,29 @@ with four hardware cores allocated to each app.
 
 | HTTP workload (requests/sec) | Rails | [Django](https://github.com/basecamp/once-campfire-django) | [Laravel](https://github.com/basecamp/once-campfire-laravel) | [Express](https://github.com/basecamp/once-campfire-express) | [Elixir](https://github.com/basecamp/once-campfire-elixir) | [Go](https://github.com/basecamp/once-campfire-go) | [Rust](https://github.com/basecamp/once-campfire-rust) | [C](https://github.com/basecamp/once-campfire-c) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Room page | 716 | 414 | 1,729 | 42,481 | 1,126 | 52,512 | 105,909 | 137,505 |
-| Messages page | 1,096 | 454 | 1,954 | 74,779 | 1,407 | 54,100 | 103,301 | 142,669 |
-| Sidebar | 1,889 | 576 | 3,434 | 94,460 | 3,621 | 58,714 | 120,930 | 151,001 |
-| Search | 1,326 | 549 | 2,710 | 83,493 | 2,127 | 60,444 | 121,502 | 148,766 |
-| Post a message | 228 | 113 | 576 | 2,121 | 1,392 | 9,000 | 8,004 | 7,486 |
+| Room page | 710 | 414 | 1,696 | 42,481 | 1,126 | 52,512 | 105,909 | 137,505 |
+| Messages page | 1,113 | 454 | 1,890 | 74,779 | 1,407 | 54,100 | 103,301 | 142,669 |
+| Sidebar | 1,901 | 576 | 3,364 | 94,460 | 3,621 | 58,714 | 120,930 | 151,001 |
+| Search | 1,332 | 549 | 2,615 | 83,493 | 2,127 | 60,444 | 121,502 | 148,766 |
+| Post a message | 226 | 113 | 567 | 2,121 | 1,392 | 9,000 | 8,004 | 7,486 |
 
 These are medians of 3 alternating rounds, with two-second warmups and
 8-second samples. The applications run serially on CPUs 8–11; the generator
 runs on separate physical cores 12–15. Builds, functional tests and other benchmarks were stopped.
-Across the timed samples, **38,429,576 responses passed with zero request errors or invalid
-responses**. The write audit verified **855,215 acknowledged warmup and timed writes**.
+Across the timed samples, **38,423,501 responses passed with zero request errors or invalid
+responses**. The write audit verified **854,705 acknowledged warmup and timed writes**.
 Peak recorded generator CPU was 195.0% of its four-core 400% capacity.
 
-Laravel was rerun in a separate serial session after the latest PR integration. Its complete three-round warmup and timed receipts replace its earlier samples; the other implementations retain their completed runs. Fixture, generator, response contracts and CPU allocations are unchanged.
+Laravel, Rails were remeasured serially after the latest integrations and review fixes. Complete three-round warmup and timed receipts replace their earlier samples; the other implementations retain their completed runs. Fixture, generator, response contracts and CPU allocations are unchanged.
 
 
 Observed minimum–maximum rates across the measured rounds:
 
 | Implementation | Room page | Messages page | Sidebar | Search | Post a message |
 |---|---:|---:|---:|---:|---:|
-| Rails | 703–720 | 1,086–1,108 | 1,885–1,908 | 1,323–1,335 | 228–232 |
+| Rails | 705–728 | 1,086–1,119 | 1,885–1,937 | 1,321–1,347 | 224–229 |
 | Django | 414–415 | 453–456 | 574–577 | 548–550 | 113–113 |
-| Laravel | 1,727–1,736 | 1,952–1,964 | 3,411–3,447 | 2,707–2,734 | 569–579 |
+| Laravel | 1,695–1,706 | 1,874–1,898 | 3,357–3,368 | 2,604–2,626 | 566–567 |
 | Express | 42,318–43,072 | 74,227–75,179 | 91,871–95,295 | 67,252–84,619 | 2,091–2,127 |
 | Elixir | 1,125–1,127 | 1,403–1,416 | 3,611–3,626 | 2,122–2,153 | 1,374–1,396 |
 | Go | 52,312–52,562 | 53,882–54,181 | 58,246–59,135 | 59,950–61,194 | 8,978–9,044 |
@@ -57,9 +57,9 @@ These compare complete configurations; they do not isolate a language or one cac
 
 | Implementation | Room page | Messages page | Sidebar | Search | Post a message |
 |---|---:|---:|---:|---:|---:|
-| Rails | 230 → 716 (3.11×) | 402 → 1,096 (2.73×) | 468 → 1,889 (4.03×) | 399 → 1,326 (3.33×) | 248 → 228 (0.92×) |
+| Rails | 230 → 710 (3.09×) | 402 → 1,113 (2.77×) | 468 → 1,901 (4.06×) | 399 → 1,332 (3.34×) | 248 → 226 (0.91×) |
 | Django | 62 → 414 (6.69×) | 70 → 454 (6.51×) | 229 → 576 (2.52×) | 118 → 549 (4.66×) | 112 → 113 (1.00×) |
-| Laravel | 760 → 1,729 (2.28×) | 924 → 1,954 (2.11×) | 1,383 → 3,434 (2.48×) | 1,135 → 2,710 (2.39×) | 498 → 576 (1.16×) |
+| Laravel | 760 → 1,696 (2.23×) | 924 → 1,890 (2.05×) | 1,383 → 3,364 (2.43×) | 1,135 → 2,615 (2.30×) | 498 → 567 (1.14×) |
 | Express | 2,622 → 42,481 (16.20×) | 3,245 → 74,779 (23.04×) | 34,938 → 94,460 (2.70×) | 6,613 → 83,493 (12.63×) | 2,088 → 2,121 (1.02×) |
 | Elixir | 942 → 1,126 (1.20×) | 1,267 → 1,407 (1.11×) | 2,515 → 3,621 (1.44×) | 1,814 → 2,127 (1.17×) | 1,400 → 1,392 (0.99×) |
 | Go | 31,673 → 52,512 (1.66×) | 30,746 → 54,100 (1.76×) | 18,586 → 58,714 (3.16×) | 29,765 → 60,444 (2.03×) | 9,073 → 9,000 (0.99×) |
@@ -92,16 +92,16 @@ fixture, generator and CPU allocations match the regular comparison above.
 
 | Mixed HTTP workload (read requests/sec) | Rails | Django | Laravel | Express | Elixir | Go | Rust | C |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Room page | 78 | 55 | 1,079 | 36,823 | 264 | 48,272 | 101,129 | 128,459 |
-| Messages page | 95 | 61 | 1,259 | 66,955 | 350 | 50,488 | 98,303 | 137,625 |
-| Sidebar | 1,510 | 228 | 3,202 | 87,056 | 3,476 | 59,301 | 119,850 | 149,652 |
-| Search | 536 | 104 | 2,233 | 76,414 | 1,317 | 59,163 | 117,670 | 146,149 |
+| Room page | 70 | 55 | 1,059 | 36,823 | 264 | 48,272 | 101,129 | 128,459 |
+| Messages page | 84 | 61 | 1,220 | 66,955 | 350 | 50,488 | 98,303 | 137,625 |
+| Sidebar | 1,507 | 228 | 2,916 | 87,056 | 3,476 | 59,301 | 119,850 | 149,652 |
+| Search | 517 | 104 | 2,185 | 76,414 | 1,317 | 59,163 | 117,670 | 146,149 |
 
 Achieved writer cadence across the timed route samples:
 
 | Implementation | Timed acknowledged writes | Writes per sample (min–max) | Writes/sec (min–max) |
 |---|---:|---:|---:|
-| Rails | 809 | 53–80 | 6.4–10.0 |
+| Rails | 809 | 50–80 | 6.2–10.0 |
 | Django | 817 | 62–80 | 7.7–10.0 |
 | Laravel | 960 | 80–80 | 9.9–10.0 |
 | Express | 960 | 80–80 | 9.9–9.9 |
@@ -110,11 +110,11 @@ Achieved writer cadence across the timed route samples:
 | Rust | 960 | 80–80 | 9.9–9.9 |
 | C | 960 | 80–80 | 9.9–9.9 |
 
-**36,032,861 timed reads and 7,386 timed writes**
-passed their response contracts, totaling **36,040,247 validated timed responses**
+**36,023,807 timed reads and 7,386 timed writes**
+passed their response contracts, totaling **36,031,193 validated timed responses**
 with zero request errors or invalid responses. The exact database/FTS audit verified
-all **9,267 acknowledged writes**, including
-1,881 warmup writes. Raw warmup and timed receipts
+all **9,270 acknowledged writes**, including
+1,884 warmup writes. Raw warmup and timed receipts
 were reconciled with every application/round audit. The writer cap is a requested maximum,
 rather than an assumption that every application achieved it.
 Peak combined reader/writer generator CPU was 96.6% of its four-core 400% capacity.
@@ -159,9 +159,9 @@ was checked, but sustained NVMe write throughput and crash-safe disk durability 
 
 | Implementation | Completed checks | Explicit limits |
 |---|---|---|
-| Rails | 510 tests, 1,875 assertions; 27 Chromium system tests, 203 assertions; Rubocop and Brakeman. | Two unit skips for unsupported libvips loaders; no system-test skips. Initial browser timing failures were retained: the boost assertion passed focused and same-seed reruns, and the send helper now waits for the persisted response before leaving the job scope. |
+| Rails | 531 tests, 1,974 assertions; 27 Chromium system tests, 203 assertions; Rubocop and Brakeman. | Two unit skips for unsupported libvips loaders; no system-test skips. Initial browser timing failures were retained: the boost assertion passed focused and same-seed reruns, and the send helper now waits for the persisted response before leaving the job scope. The complete system suite passed at counter integration `fd49099`; later task-only repair has fresh native and production gates at `8de3e22`. |
 | Django | 63 tests, Ruff and real Chromium functional flows. | Malformed rich-text and media byte parity are not established; live browser-provider Web Push requires external subscriptions. |
-| Laravel | 64 tests, 888 assertions, Pint and real Chromium functional flows. | Exact rich-text parity, broader audio/video/PDF preview coverage, restore/upgrade and live browser-provider Web Push remain unverified in its contract ledger. |
+| Laravel | 71 tests, 945 assertions, Pint and real Chromium functional flows. | Exact rich-text parity, broader audio/video/PDF preview coverage, restore/upgrade and live browser-provider Web Push remain unverified in its contract ledger. |
 | Express | 151 tests under Node and Bun, no skips, pinned formatter and real Chromium functional flows. | Public-site OpenGraph and live browser-provider Web Push remain unverified; malformed/legacy rich text outside the independent corpus can differ. |
 | Elixir | Current 1,956-test native suite and strict compilation/formatting; one uninterrupted complete 65-gate parity run at the reviewed backend revision; rebuilt production asset manifest verified. | The complete parity run predates the latest browser fixes; current regression checks supplement it. Verification used pinned OTP 29 in a disposable checkout; no production cutover is claimed. |
 | Go | Full race/vet/assets/WebSocket-fork suite; real Chromium; production backup/restore/restart; real Go/Rust cookie and message/FTS interoperability; real ACME issuance and cached HTTPS restart with the CA offline. | Strict byte-for-byte HTML/network parity remains incomplete, as documented by the port. |
@@ -205,6 +205,13 @@ follow-up Rails, Laravel and Rust fixes. Confirmed issues were reproduced locall
 fallback fragments could outlive foreign writes, Rust detached presentation could capture its
 generation after reading old data, and Rails instrumented fragment keys exposed the raw session
 credential. The fixes, source-validated non-blockers and review receipts were retained locally.
+A final approved incremental review covered the latest Rails #337 and Laravel #2 integrations.
+Its concrete follow-up findings were reproduced and corrected: SQLite schema/migration tasks
+now repair counters in the selected database on every invocation; Laravel writer waits respect
+the configured busy timeout, lock paths use the opened canonical database, and raw transactions
+retain their lock, bypass committed caches and roll back at the Octane request boundary. Cookie
+payload comparison is strict. Speculative findings were checked against actual framework source;
+startup still fails closed if counter repair cannot take the SQLite write lock.
 The paced-writer profile addresses the review's cache-churn concern; correctness checks do not
 establish a speedup under every workload.
 
@@ -233,6 +240,12 @@ Nested fragment caches also account for foreign updates without a timestamp chan
 Rails gives native ERB collection and Jbuilder fragments a separate 64 MiB memory budget per
 worker, namespaces them with the pre-authentication snapshot and rendering context, and keeps
 shared rate-limit stores unchanged. Sixteen fixed locks collapse concurrent cold page renders.
+Rails bot pagination uses SQLite-maintained counters; ordinary foreign and bulk writes are
+covered by insert/delete/room-move triggers. Migration backfill, missing-trigger repair and
+replacement are atomic, and schema/migration tasks restore counters before later task steps.
+External REPLACE writers must enable recursive_triggers so SQLite fires the corresponding delete
+trigger; migrations rebuilding messages must repair counters before reading them inside that
+migration. The shared HTTP table does not quantify the separate bot-count query improvement.
 Laravel shares its 64 MiB budget between pages and token-neutral native fragments, with snapshot
 capture on every route. Rust captures detached presentation snapshots before their database
 reads; detached Rails renderers bypass fragment reuse because they do not run those callbacks.
@@ -276,7 +289,7 @@ selection but are not mixed into the current, stricter comparison.
 | [once-campfire #324](https://github.com/basecamp/once-campfire/pull/324) | namespaceMarcello | Merged: independently checked; integrated production build included in the current comparison. |
 | [once-campfire #323](https://github.com/basecamp/once-campfire/pull/323) | namespaceMarcello | Merged: independently checked; integrated production build included in the current comparison. |
 | [once-campfire #322](https://github.com/basecamp/once-campfire/pull/322) | namespaceMarcello | Merged: independently checked; integrated production build included in the current comparison. |
-| [once-campfire #321](https://github.com/basecamp/once-campfire/pull/321) | thomasklemm | Closed by its author in favor of #337; shared-SQLite counter maintenance still needs the follow-up's cross-writer regressions. |
+| [once-campfire #321](https://github.com/basecamp/once-campfire/pull/321) | thomasklemm | Closed by its author in favor of #337; the successor's SQLite-trigger maintenance and independent cross-writer controls passed before merging. |
 | [once-campfire #319](https://github.com/basecamp/once-campfire/pull/319) | thomasklemm | Leave open: disables auto-checkpointing globally without a writer-side fallback in console/rake writers; also includes unrelated dependency/test/CI removals. |
 | [once-campfire #318](https://github.com/basecamp/once-campfire/pull/318) | thomasklemm | Merged: independently checked; integrated production build included in the current comparison. |
 | [once-campfire #316](https://github.com/basecamp/once-campfire/pull/316) | namespaceMarcello | Merged: independently checked; integrated production build included in the current comparison. |
@@ -289,7 +302,7 @@ selection but are not mixed into the current, stricter comparison.
 | [once-campfire-rust #45](https://github.com/basecamp/once-campfire-rust/pull/45) | namespaceMarcello | Merged: independently checked; integrated production build included in the current comparison. |
 | [once-campfire-go #2](https://github.com/basecamp/once-campfire-go/pull/2) | chemshit | Leave open: ENV GCGO is not Go's GOGC setting and has no GC tuning effect. |
 | [once-campfire-go #4](https://github.com/basecamp/once-campfire-go/pull/4) | sernle | Competing implementation independently built/preflighted/timed. Full-sidebar correction extracted and credited; #9 was selected after the earlier competing-build review. |
-| [once-campfire-go #5](https://github.com/basecamp/once-campfire-go/pull/5) | kidandcat | Leave open: generation caches advance only for writes through this DB instance and can reuse stale data after an external SQLite writer commits. |
+| [once-campfire-go #5](https://github.com/basecamp/once-campfire-go/pull/5) | kidandcat | Latest `63dd3a5` adds a pinned data_version observer and foreign-connection tests, fixing the original local-only objection. Source review still finds stale nested message HTML after unversioned foreign edits and transaction bookkeeping that can absorb a foreign commit without invalidating warm windows. Its advertised throughput is not independently verified. |
 | [once-campfire-go #6](https://github.com/basecamp/once-campfire-go/pull/6) | nick-potts | Competing implementation independently built/preflighted/timed. Guarded renderer incorporated and credited in #9, selected after the earlier competing-build review. |
 | [once-campfire-go #7](https://github.com/basecamp/once-campfire-go/pull/7) | riscdanger | Competing implementation independently built/preflighted/timed. Alternative compression approach to #9; #9 was selected after the earlier competing-build review. |
 | [once-campfire-go #8](https://github.com/basecamp/once-campfire-go/pull/8) | borovikovd | Leave open: publication relies on subscribe-time authorization/own-write disconnects; external membership revocation does not receive the same fresh check as #9. |
@@ -304,7 +317,7 @@ selection but are not mixed into the current, stricter comparison.
 | [once-campfire-laravel #2](https://github.com/basecamp/once-campfire-laravel/pull/2) | JackEllis | Merged at `ffb6db2`, retaining Jack Ellis's contributor history and credit. Independent 64-test native and production checks passed; formatted sound commands and failed-COMMIT lock handling were corrected. Latest integrated source was remeasured with validated responses and exact write audits; advertised branch throughput is not assumed. |
 | [once-campfire-laravel #4](https://github.com/basecamp/once-campfire-laravel/pull/4) | SilentKernel | Merged: independently checked; integrated production build included in the current comparison. |
 | [once-campfire-express #3](https://github.com/basecamp/once-campfire-express/pull/3) | pstachula-dev | Merged: independently checked; integrated production build included in the current comparison. |
-| [once-campfire #337](https://github.com/basecamp/once-campfire/pull/337) | thomasklemm | Rewritten with SQLite triggers and foreign/bulk/rollback tests at `32748e7`, resolving the callback-only objection. Source review still finds missing-trigger repair preserves stale counts and nontransactional trigger replacement permits writer/startup races; throughput not independently measured. |
+| [once-campfire #337](https://github.com/basecamp/once-campfire/pull/337) | thomasklemm | Merged at `fd49099`, preserving Thomas Klemm's original contributor history. Latest `b4ab2df` fixes atomic trigger replacement and missing-trigger repair. Full native and browser suites plus independent legacy-schema migration, foreign/bulk/rollback/repair controls passed; populated bot pagination returns exact IDs/totals without a message COUNT query. The shared five-route table does not measure the bot pagination benefit. |
 
 Constructive explanations were posted on all 17 proposals that were initially unmerged, with
 source-review findings distinguished from independently validated changes.
@@ -314,7 +327,7 @@ source-review findings distinguished from independently validated changes.
 | [once-campfire #164](https://github.com/basecamp/once-campfire/pull/164) | [Review comment](https://github.com/basecamp/once-campfire/pull/164#issuecomment-6043359249) |
 | [once-campfire #319](https://github.com/basecamp/once-campfire/pull/319) | [Review comment](https://github.com/basecamp/once-campfire/pull/319#issuecomment-6043360009) |
 | [once-campfire #321](https://github.com/basecamp/once-campfire/pull/321) | [Review comment](https://github.com/basecamp/once-campfire/pull/321#issuecomment-6043360904) |
-| [once-campfire #337](https://github.com/basecamp/once-campfire/pull/337) | [Review comment](https://github.com/basecamp/once-campfire/pull/337#issuecomment-6046283990) |
+| [once-campfire #337](https://github.com/basecamp/once-campfire/pull/337) | [Review comment](https://github.com/basecamp/once-campfire/pull/337#issuecomment-6047221603) |
 | [once-campfire-elixir #1](https://github.com/basecamp/once-campfire-elixir/pull/1) | [Review comment](https://github.com/basecamp/once-campfire-elixir/pull/1#issuecomment-6043362105) |
 | [once-campfire-elixir #2](https://github.com/basecamp/once-campfire-elixir/pull/2) | [Review comment](https://github.com/basecamp/once-campfire-elixir/pull/2#issuecomment-6043362574) |
 | [once-campfire-elixir #3](https://github.com/basecamp/once-campfire-elixir/pull/3) | [Review comment](https://github.com/basecamp/once-campfire-elixir/pull/3#issuecomment-6043363360) |
@@ -322,7 +335,7 @@ source-review findings distinguished from independently validated changes.
 | [once-campfire-elixir #6](https://github.com/basecamp/once-campfire-elixir/pull/6) | [Review comment](https://github.com/basecamp/once-campfire-elixir/pull/6#issuecomment-6043365012) |
 | [once-campfire-go #2](https://github.com/basecamp/once-campfire-go/pull/2) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/2#issuecomment-6043365835) |
 | [once-campfire-go #4](https://github.com/basecamp/once-campfire-go/pull/4) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/4#issuecomment-6043366407) |
-| [once-campfire-go #5](https://github.com/basecamp/once-campfire-go/pull/5) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/5#issuecomment-6043366956) |
+| [once-campfire-go #5](https://github.com/basecamp/once-campfire-go/pull/5) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/5#issuecomment-6047714954) |
 | [once-campfire-go #6](https://github.com/basecamp/once-campfire-go/pull/6) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/6#issuecomment-6043367657) |
 | [once-campfire-go #7](https://github.com/basecamp/once-campfire-go/pull/7) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/7#issuecomment-6043368328) |
 | [once-campfire-go #8](https://github.com/basecamp/once-campfire-go/pull/8) | [Review comment](https://github.com/basecamp/once-campfire-go/pull/8#issuecomment-6043369224) |
@@ -333,9 +346,9 @@ source-review findings distinguished from independently validated changes.
 
 | Implementation | Measured source revision | Production image | OCI revision label |
 |---|---|---|---|
-| Rails | [`7271eb5`](https://github.com/basecamp/once-campfire/commit/7271eb59f43ac717e12a8a37ad0a184055be120b) | `sha256:afa4166af7fb74f8c3790dbbf22606e075a1bba69574f02a10ab5131c7438562` | `7271eb59f43ac717e12a8a37ad0a184055be120b` |
+| Rails | [`8de3e22`](https://github.com/basecamp/once-campfire/commit/8de3e22ab43120d04af0de739c92ee865f079cb4) | `sha256:1b0eba554b63423b17efdf25010f5f6a7dadc5ad1032cdb12022567acd96baa0` | `8de3e22ab43120d04af0de739c92ee865f079cb4` |
 | Django | [`5834bc2`](https://github.com/basecamp/once-campfire-django/commit/5834bc2c6441618c70a63ca39fd1249c1bf9169b) | `sha256:78409f0bdf6b27c003bf3cb40e05e04b961ae4ce23fef7efe6df14d5a5634ad5` | `5834bc2c6441618c70a63ca39fd1249c1bf9169b` |
-| Laravel | [`ffb6db2`](https://github.com/basecamp/once-campfire-laravel/commit/ffb6db2f74f156b1273cfda5259c27eb78500ea7) | `sha256:d245372ec65a16669f0c656cd96a2adb67c392326cdc43a620725167d431bde3` | `ffb6db2f74f156b1273cfda5259c27eb78500ea7` |
+| Laravel | [`f054cd6`](https://github.com/basecamp/once-campfire-laravel/commit/f054cd6a70e80618714b7d47ba5b9db48bed1ff3) | `sha256:695b8882468a64f8585baba006d51c5fd9689e00f98d52c325401ec33a5a6765` | `f054cd6a70e80618714b7d47ba5b9db48bed1ff3` |
 | Express | [`f0a7d96`](https://github.com/basecamp/once-campfire-express/commit/f0a7d96565c0bbd35772d5bd962b7c6625bbdae1) | `sha256:8f0e866fd37862647dcc57d715c8a5241894748c4387e8a0beccdfcb45c07e8e` | `f0a7d96565c0bbd35772d5bd962b7c6625bbdae1` |
 | Elixir | [`931ed55`](https://github.com/basecamp/once-campfire-elixir/commit/931ed556644b7848c72f732e0e603dd34760d29f) | `sha256:4f58f03d7ac9a03fd2c909c6d9b4f142dc410b75079c87dee98a8d621a0f1e68` | `931ed556644b7848c72f732e0e603dd34760d29f` |
 | Go | [`6eb12e8`](https://github.com/basecamp/once-campfire-go/commit/6eb12e8599cafeb3ff8229e237b4efdcf09fee24) | `sha256:e21db245a7523384fbb7ee7f84352029c396b5a26b2efa6a8bfb8ea7a9448419` | `unlabelled` |
@@ -363,13 +376,13 @@ Each cell shows earlier → current read requests/sec and the current/earlier ra
 
 | Implementation | Room page | Messages page | Sidebar | Search |
 |---|---:|---:|---:|---:|
-| Rails | 205 → 78 (0.38×) | 369 → 95 (0.26×) | 425 → 1,510 (3.56×) | 359 → 536 (1.49×) |
-| Laravel | 728 → 1,079 (1.48×) | 892 → 1,259 (1.41×) | 1,361 → 3,202 (2.35×) | 1,092 → 2,233 (2.05×) |
+| Rails | 205 → 70 (0.34×) | 369 → 84 (0.23×) | 425 → 1,507 (3.55×) | 359 → 517 (1.44×) |
+| Laravel | 728 → 1,059 (1.45×) | 892 → 1,220 (1.37×) | 1,361 → 2,916 (2.14×) | 1,092 → 2,185 (2.00×) |
 | Elixir | 931 → 264 (0.28×) | 1,252 → 350 (0.28×) | 2,495 → 3,476 (1.39×) | 1,796 → 1,317 (0.73×) |
 
 | Implementation | Earlier writer requests/sec (min–max) | Current writer requests/sec (min–max) | Earlier source |
 |---|---:|---:|---|
-| Rails | 9.4–10.0 | 6.4–10.0 | [`27f5461`](https://github.com/basecamp/once-campfire/commit/27f5461067352e009e43b9b1780f802fd7d027a0) |
+| Rails | 9.4–10.0 | 6.2–10.0 | [`27f5461`](https://github.com/basecamp/once-campfire/commit/27f5461067352e009e43b9b1780f802fd7d027a0) |
 | Laravel | 9.9–10.0 | 9.9–10.0 | [`1952aee`](https://github.com/basecamp/once-campfire-laravel/commit/1952aee93ab7a7bf83858ba3ea60646ecd804e88) |
 | Elixir | 9.9–10.0 | 9.9–10.0 | [`db7958b`](https://github.com/basecamp/once-campfire-elixir/commit/db7958b4c39141c4574dabf21e3c2c301779891b) |
 
