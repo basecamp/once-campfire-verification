@@ -18,12 +18,14 @@
 //! for allocation counting) and `--trace FILE` (each request's start, latency and status). `cable` prints `PHASE <name> <unix ms>` lines on stderr so memory
 //! samples can be attributed to its phases.
 //!
-//! By default every `cable` client is a tab of the `--cookie` user. `--sessions FILE` makes them different people:
-//! one line per person, `cookie<TAB>identifier<TAB>identifier...` (the subscriptions that person's page makes), client n
+//! By default every `cable` client is a tab of the `--cookie` user. `--sessions FILE` supplies separate sessions:
+//! one line per session, `cookie<TAB>identifier<TAB>identifier...` (the subscriptions that session's page makes), client n
 //! taking line n % lines, so per-member work (each person's unread notice, presence row and user streams) is exercised.
 //! `--refresh-secs S` sends `PresenceChannel#refresh` every S seconds from each client, as a visible room page does
 //! every 50; it needs a PresenceChannel identifier among the subscriptions and is not supported with `--deflate`.
-//! The result counts the unread-room notices received (`unread_frames`) and the refreshes sent.
+//! The result counts unread notices and refreshes sent, supplied session rows and distinct cookie strings.
+//! Cookie strings do not prove distinct people; create sessions for independently verified fixture users.
+//! Subscription counts report a range and are null when clients use different counts.
 //!
 //! Every command takes `--user-agent UA`, sent as the `User-Agent` of each request it makes,
 //! WebSocket handshakes included; without it there is no `User-Agent` header. For example, a
@@ -525,7 +527,7 @@ async fn cable_client(
     connected: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     delivery: Arc<Delivery>,
-    refresh: Option<(f64, f64)>,
+    refresh: Option<(Duration, f64)>,
 ) -> Res<()> {
     let mut req = format!("ws://{addr}/cable").into_client_request()?;
     let h = req.headers_mut();
@@ -562,19 +564,17 @@ async fn cable_client(
     }
     let mut seen = HashSet::new();
     let mut confirms = 0;
-    let presence = subs.iter().find(|s| s.contains("PresenceChannel")).cloned();
-    let mut refresh_timer = match (refresh, &presence) {
-        (Some((period, phase)), Some(_)) => Some(tokio::time::interval_at(
-            tokio::time::Instant::now() + Duration::from_secs_f64(period * phase),
-            Duration::from_secs_f64(period),
-        )),
-        _ => None,
-    };
+    let presence = subs
+        .iter()
+        .find(|identifier| serde_json::from_str::<Value>(identifier).ok().is_some_and(|value| value["channel"] == "PresenceChannel"))
+        .cloned();
+    let mut refresh_timer: Option<tokio::time::Interval> = None;
     loop {
         let msg = match refresh_timer.as_mut() {
             Some(timer) => tokio::select! {
                 m = rx.next() => m,
                 _ = timer.tick() => {
+                    if stop.load(Ordering::Relaxed) { break; }
                     let data = json!({"action": "refresh"}).to_string();
                     let command = json!({"command": "message", "identifier": presence.as_deref().unwrap_or_default(), "data": data});
                     tx.send(WsMessage::text(command.to_string())).await?;
@@ -594,9 +594,44 @@ async fn cable_client(
             _ => continue,
         };
         on_text(&text, subs.len(), &mut confirms, &mut seen, &confirmed, &delivery);
+        if refresh_timer.is_none()
+            && let (Some((period, phase)), Some(identifier)) = (refresh, &presence)
+            && serde_json::from_str::<Value>(&text)
+                .ok()
+                .is_some_and(|value| value["type"] == "confirm_subscription" && value["identifier"].as_str() == Some(identifier.as_str()))
+        {
+            refresh_timer = Some(presence_timer(period, phase));
+        }
     }
     let _ = tx.send(WsMessage::Close(None)).await;
     Ok(())
+}
+
+fn refresh_period(raw: Option<&str>) -> Res<Option<Duration>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let seconds: f64 = raw.parse().map_err(|_| "--refresh-secs must be a finite nonnegative number")?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err("--refresh-secs must be a finite nonnegative number".into());
+    }
+    if seconds == 0.0 {
+        return Ok(None);
+    }
+    let period = Duration::try_from_secs_f64(seconds).map_err(|_| "--refresh-secs is outside the supported duration range")?;
+    if period.is_zero() {
+        return Err("--refresh-secs must be at least one nanosecond".into());
+    }
+    if Instant::now().checked_add(period).is_none() {
+        return Err("--refresh-secs is outside the supported timer range".into());
+    }
+    Ok(Some(period))
+}
+
+fn presence_timer(period: Duration, phase: f64) -> tokio::time::Interval {
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period.mul_f64(1.0 - phase), period);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
 }
 
 /// A frame's text: counts subscription confirmations and records each marked message's arrival.
@@ -644,7 +679,7 @@ fn is_unread_notice(text: &str) -> bool {
     text.contains(r#""message":{"#) && text.contains(r#""roomId":"#)
 }
 
-/// `--sessions` lines: `cookie<TAB>identifier<TAB>identifier...`, one person each; blank lines are skipped.
+/// `--sessions` lines: `cookie<TAB>identifier<TAB>identifier...`; blank lines are skipped.
 fn parse_sessions(text: &str) -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
@@ -661,6 +696,29 @@ fn session_for(sessions: &[(String, Vec<String>)], n: usize, cookie: &str, subs:
         Some((c, s)) => (c.clone(), s.clone()),
         None => (cookie.to_string(), subs.to_vec()),
     }
+}
+
+// Report only the rows and cookie strings actually assigned to clients; neither establishes user identity.
+fn session_profile(sessions: &[(String, Vec<String>)], clients: usize, cookie: &str, subs: &[String]) -> Value {
+    let rows = if clients == 0 { 0 } else { sessions.len().max(1).min(clients) };
+    let mut cookies = HashSet::new();
+    let mut min = usize::MAX;
+    let mut max = 0;
+    for n in 0..rows {
+        let (cookie, subs) = session_for(sessions, n, cookie, subs);
+        cookies.insert(cookie);
+        min = min.min(subs.len());
+        max = max.max(subs.len());
+    }
+    if rows == 0 {
+        min = 0;
+    }
+    json!({
+        "session_rows": rows,
+        "distinct_session_cookies": cookies.len(),
+        "subscriptions_per_client": (min == max).then_some(min),
+        "subscriptions_per_client_range": {"min": min, "max": max},
+    })
 }
 
 /// `--deflate`: a minimal WebSocket client (RFC 6455) that offers `permessage-deflate` as browsers
@@ -884,9 +942,7 @@ async fn cable(a: &Args) -> Res<Value> {
         let (channel, name) = s.split_once('|').unwrap_or(("Turbo::StreamsChannel", s));
         subs.push(json!({"channel": channel, "signed_stream_name": name}).to_string());
     }
-    // `--sessions FILE`: one line per person, `cookie<TAB>identifier<TAB>identifier...`, so that N clients
-    // are N people (each with their own memberships, unread stream and user stream) instead of N tabs
-    // of the `--cookie` user. Client n uses line n % lines.
+    // Client n takes session row n % rows; use a fixture with verified distinct users for a people profile.
     let sessions = match a.opt("sessions") {
         Some(path) => parse_sessions(&std::fs::read_to_string(path)?),
         None => Vec::new(),
@@ -899,8 +955,8 @@ async fn cable(a: &Args) -> Res<Value> {
     }
     // `--refresh-secs S`: send PresenceChannel#refresh every S seconds, as presence_controller.js does
     // every 50 while the page is visible. 0 (the default) sends none.
-    let refresh_secs: f64 = a.num("refresh-secs", 0.0);
-    if deflate && refresh_secs > 0.0 {
+    let refresh_period = refresh_period(a.0.get("refresh-secs").map(String::as_str))?;
+    if deflate && refresh_period.is_some() {
         return Err("--refresh-secs is not supported with --deflate".into());
     }
 
@@ -944,7 +1000,7 @@ async fn cable(a: &Args) -> Res<Value> {
                 tokio::spawn(deflate_cable_client(addr, source, cookie, subs, confirmed, connected, stop, delivery))
             } else {
                 // Browsers aren't in step: each client's refresh timer starts at its own point of the period.
-                let refresh = (refresh_secs > 0.0).then(|| (refresh_secs, ((n as f64) * 0.618_034).fract()));
+                let refresh = refresh_period.map(|period| (period, ((n as f64) * 0.618_034).fract()));
                 tokio::spawn(cable_client(addr, source, cookie, subs, confirmed, connected, stop, delivery, refresh))
             };
             // Release the permit once this client has connected (or failed).
@@ -1084,13 +1140,16 @@ async fn cable(a: &Args) -> Res<Value> {
     for h in handles {
         h.abort();
     }
+    let profile = session_profile(&sessions, clients, &cookie, &subs);
     Ok(json!({
         "clients": clients,
         "ready": ready,
         "failed": failed.load(Ordering::Relaxed),
         "connect_secs": (connect_secs * 100.0).round() / 100.0,
-        "subscriptions_per_client": subs.len(),
-        "people": if sessions.is_empty() { 1 } else { sessions.len().min(clients) },
+        "subscriptions_per_client": profile["subscriptions_per_client"],
+        "subscriptions_per_client_range": profile["subscriptions_per_client_range"],
+        "session_rows": profile["session_rows"],
+        "distinct_session_cookies": profile["distinct_session_cookies"],
         "unread_frames": delivery.unread_frames.load(Ordering::Relaxed),
         "refreshes": delivery.refreshes.load(Ordering::Relaxed),
         "latency": latency,
@@ -1439,7 +1498,7 @@ mod cable_client_tests {
     }
 
     #[test]
-    fn sessions_are_one_person_per_line() {
+    fn sessions_preserve_each_rows_cookie_and_subscriptions() {
         let text = "session_token=a%3D--1\t{\"channel\":\"PresenceChannel\",\"room_id\":1}\t{\"channel\":\"HeartbeatChannel\"}\n\n\
                     session_token=b%3D--2\t{\"channel\":\"UnreadRoomsChannel\"}\n";
         let sessions = parse_sessions(text);
@@ -1459,6 +1518,38 @@ mod cable_client_tests {
         assert_eq!(session_for(&sessions, 1, "user", &tab), ("b".into(), vec!["sb1".into(), "sb2".into()]));
         assert_eq!(session_for(&sessions, 2, "user", &tab), ("a".into(), vec!["sa".into()]));
         assert_eq!(session_for(&[], 5, "user", &tab), ("user".into(), tab.clone()));
+    }
+
+    #[test]
+    fn refresh_period_rejects_invalid_and_unrepresentable_values() {
+        assert_eq!(refresh_period(None).unwrap(), None);
+        assert_eq!(refresh_period(Some("0")).unwrap(), None);
+        assert_eq!(refresh_period(Some("0.05")).unwrap(), Some(Duration::from_millis(50)));
+        for value in ["NaN", "inf", "-1", "nope", "1e300", "1e-30"] {
+            assert!(refresh_period(Some(value)).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn session_profile_reports_used_rows_without_claiming_distinct_people() {
+        let sessions = parse_sessions("same\ta\nsame\ta\tb\nunused\ta\n");
+        let profile = session_profile(&sessions, 2, "fallback", &[]);
+        assert_eq!(profile["session_rows"], 2);
+        assert_eq!(profile["distinct_session_cookies"], 1);
+        assert!(profile["subscriptions_per_client"].is_null());
+        assert_eq!(profile["subscriptions_per_client_range"], json!({"min": 1, "max": 2}));
+        let profile = session_profile(&[], 5, "fallback", &["a".into()]);
+        assert_eq!(profile["session_rows"], 1);
+        assert_eq!(profile["distinct_session_cookies"], 1);
+        assert_eq!(profile["subscriptions_per_client"], 1);
+        assert_eq!(session_profile(&sessions, 0, "fallback", &[])["session_rows"], 0);
+    }
+
+    #[tokio::test]
+    async fn presence_timer_delays_first_refresh_and_skips_missed_ticks() {
+        let mut timer = presence_timer(Duration::from_millis(50), 0.0);
+        assert_eq!(timer.missed_tick_behavior(), tokio::time::MissedTickBehavior::Skip);
+        assert!(tokio::time::timeout(Duration::from_millis(10), timer.tick()).await.is_err());
     }
 
     #[test]
@@ -1502,9 +1593,15 @@ mod cable_client_tests {
                 match command["command"].as_str().unwrap() {
                     "subscribe" => {
                         subscribed.push(identifier.clone());
-                        let confirm = json!({"identifier": identifier, "type": "confirm_subscription"});
-                        tx.send(WsMessage::text(confirm.to_string())).await.unwrap();
                         if subscribed.len() == 2 {
+                            assert!(
+                                tokio::time::timeout(Duration::from_millis(75), rx.next()).await.is_err(),
+                                "refresh arrived before presence confirmation"
+                            );
+                            for identifier in &subscribed {
+                                let confirm = json!({"identifier": identifier, "type": "confirm_subscription"});
+                                tx.send(WsMessage::text(confirm.to_string())).await.unwrap();
+                            }
                             let notice = json!({"identifier": subscribed[1], "message": {"roomId": 1, "at": 1.5}});
                             tx.send(WsMessage::text(notice.to_string())).await.unwrap();
                             let marked = json!({"identifier": subscribed[0], "message": "<turbo-stream>fanout bmk7z</turbo-stream>"});
@@ -1543,7 +1640,7 @@ mod cable_client_tests {
             connected.clone(),
             Arc::new(AtomicBool::new(false)),
             delivery.clone(),
-            Some((0.05, 0.0)),
+            Some((Duration::from_millis(50), 0.0)),
         );
         tokio::time::timeout(Duration::from_secs(10), client).await.unwrap().unwrap();
         let (headers, subscribed, refreshes) = server.await.unwrap();

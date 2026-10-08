@@ -56,6 +56,8 @@ The browser flow creates and modifies accounts, rooms and messages. Run each imp
 
 The HTTP client sends Fetch Metadata for browser writes and includes legacy CSRF tokens only when an older implementation provides them.
 
+`loadgen cable --sessions FILE --refresh-secs 50` exercises separate session subscriptions and staggered presence refreshes. Each line contains a cookie followed by tab-separated Action Cable identifiers; clients cycle through the rows. Generate sessions for independently verified fixture users when testing distinct people. Results report assigned rows, distinct cookie strings, subscription count ranges, unread notices and refreshes sent; cookie counts alone do not establish user counts. Refreshes start after presence subscription confirmation and skip missed ticks. This profile requires the ordinary WebSocket client; `--deflate` does not support refresh commands.
+
 Raw results, seeds and browser artifacts stay in ignored directories. Raw benchmark receipts are not committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
 
 ## Provenance
