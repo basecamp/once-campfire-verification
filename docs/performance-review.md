@@ -111,6 +111,22 @@ Whole-page and fragment budgets remain separate, bounded per-worker caches. Comp
 
 Laravel checks membership afresh on every cache hit using a narrow existence query and loads the Room model only on a miss. Unchanged native session reads avoid rewriting the session file/cookie until the half-lifetime refresh boundary, and the permanent last-room cookie changes only when the room changes. Creation retains already-known relationships, directly inserts new rich text/search rows, and batches ordered room/unread outbox appends under one lock. Integration corrections keep message, rich text, FTS and unread updates atomic, resolve SGID-backed mention plain text after taking the write lock, and transfer Rails #336's first-unread policy for shared rooms. Existing pre-authentication snapshots, admission checks, bounds, gzip and foreign-writer controls remain.
 
+### Rails posting diagnostic
+
+A separate instrumented production ActionDispatch process at `4bcc745`, using frozen image `sha256:43ded52f63b5b4f25041214c961f652f9add69d15b395d1efc0acadb21df7d13`, validated 100 sequential POSTs after 20 warmups with real Redis and three Resque workers. Runtime source-byte checks matched. This exercises native creation, rendering and job delivery, without Puma/Thrust dispatch or wire gzip.
+
+| Diagnostic per POST | Observed value |
+|---|---:|
+| Full instrumented request, median | 5.815 ms |
+| Message partial rendering, median | 1.296 ms |
+| Creation transaction BEGIN-to-COMMIT interval, median | 1.075 ms |
+| SQL count; total SQL time, mean | 16; 0.446 ms |
+| Allocations, median | 9,666 |
+
+Notification timings are inclusive and overlap; they must not be added together. The BEGIN-to-COMMIT interval includes any lock-acquisition wait and does not directly measure write-lock occupancy. Instrumentation adds overhead, and this sequential process is distinct from the 16-client HTTP benchmark; it does not establish the cause of the roughly 2.4× Laravel/Rails posting gap.
+
+Source and SQL traces identify narrower opportunities: Laravel retains known new-message relationships and prepares ordinary attachmentless plain text before its transaction, while resolving SGID-backed text inside it. Rails retains native Action Text callbacks inside creation and queries fresh boosts and attachment metadata during presentation. The timestamp-only message UPDATE is Action Text's native touch and averaged about 0.009 ms here; it is not a large measured SQL cost. Across all three diagnostic runs, 360 posts and 720 real jobs completed with zero job failures, no missing FTS rows or counter mismatches, and drained queues. These diagnostics change no runtime source or benchmark figures; raw profile artifacts remain uncommitted.
+
 ## Source, images and checks
 
 | Implementation | Measured source | Frozen image | Native checks |
