@@ -1,6 +1,6 @@
 # Campfire performance and verification, 2026-10-08
 
-The implementations retain the Campfire design and installation contracts while using native backends, Fetch Metadata for browser writes, fresh authorization, and bounded caches of complete HTML/gzip responses. Rails now runs Ruby 4.0.7 with Puma 8.0.2; its rendering and message-write paths have also been simplified. Express retains Express and Node/Bun support while reducing redundant message-creation work. Laravel shortens authenticated read/session paths and creation/broadcast work while preserving atomic writes and fresh permissions.
+The implementations retain the Campfire design and installation contracts while using native backends, Fetch Metadata for browser writes, fresh authorization, and bounded caches of complete HTML/gzip responses. Rails now runs Ruby 4.0.7 with Puma 8.0.2; its rendering and message-write paths have also been simplified. Express retains Express and Node/Bun support while reducing redundant message-creation work. Laravel shortens authenticated read/session paths and creation/broadcast work while preserving atomic writes and fresh permissions. Django now prepares ordinary bodies before its transaction, reuses the created fragment, batches publications/jobs and uses its existing four-worker Redis topology.
 
 ## Current production HTTP results
 
@@ -8,22 +8,22 @@ Measured with 16 concurrent clients on an AMD Ryzen AI MAX+ 395 with 32 GB RAM, 
 
 | HTTP workload (requests/sec) | Rails | [Django](https://github.com/basecamp/once-campfire-django) | [Laravel](https://github.com/basecamp/once-campfire-laravel) | [Express](https://github.com/basecamp/once-campfire-express) | [Elixir](https://github.com/basecamp/once-campfire-elixir) | [Go](https://github.com/basecamp/once-campfire-go) | [Rust](https://github.com/basecamp/once-campfire-rust) | [C](https://github.com/basecamp/once-campfire-c) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Room page | 4,132 | 478 | 3,872 | 42,636 | 5,350 | 53,060 | 106,494 | 137,524 |
-| Messages page | 4,035 | 486 | 3,995 | 74,362 | 5,712 | 54,800 | 102,697 | 144,642 |
-| Sidebar | 4,257 | 601 | 4,493 | 94,329 | 5,949 | 59,144 | 120,294 | 152,002 |
-| Search | 4,216 | 594 | 4,172 | 84,665 | 5,848 | 60,509 | 121,378 | 149,487 |
-| Post a message | 325 | 112 | 794 | 2,155 | 1,278 | 9,021 | 8,037 | 7,530 |
+| Room page | 4,101 | 1,507 | 3,872 | 42,636 | 5,350 | 53,060 | 106,494 | 137,524 |
+| Messages page | 4,115 | 1,596 | 3,995 | 74,362 | 5,712 | 54,800 | 102,697 | 144,642 |
+| Sidebar | 4,333 | 1,873 | 4,493 | 94,329 | 5,949 | 59,144 | 120,294 | 152,002 |
+| Search | 4,282 | 1,862 | 4,172 | 84,665 | 5,848 | 60,509 | 121,378 | 149,487 |
+| Post a message | 330 | 262 | 794 | 2,155 | 1,278 | 9,021 | 8,037 | 7,530 |
 
-Rails, Express and Laravel were remeasured in separate sessions on October 8, 2026 after their selected changes. The final Rails session runs three solo rounds; the separate Express/Laravel sessions alternate those two implementations for three rounds. Each uses two seconds of warmup and eight seconds per sample. The five untouched implementations (Django, Elixir, Go, Rust and C) retain exactly their independently verified figures from the [previous published comparison](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md); they were not rerun for this update. All sessions use the same machine, CPU allocation, fixture, 16-client contracts and gzip. This current configuration table combines those sessions and does not imply a fresh simultaneous eight-build comparison.
+Rails, Express and Laravel were remeasured in separate sessions on October 8, 2026 after their selected changes. The final Rails session runs three solo rounds; the separate Express/Laravel sessions alternate those two implementations for three rounds. Each uses two seconds of warmup and eight seconds per sample. Django was subsequently remeasured in a separate three-round session with four Uvicorn workers and Redis on the same four server CPUs. Its normal profile includes the five table workloads plus avatar, static CSS and health responses. The four untouched implementations (Elixir, Go, Rust and C) retain exactly their independently verified figures from the [previous published comparison](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md); they were not rerun for this update. All sessions use the same machine, CPU allocation, fixture, 16-client contracts and gzip. This current configuration table combines those sessions and does not imply a fresh simultaneous eight-build comparison.
 
-All applications run serially on CPUs 8–11; the generator uses 12–15. Builds, tests and other benchmarks stop during timing. The final Rails session validated 405,907 timed responses and audited 8,996 exact acknowledged writes including warmup, with zero errors or invalid responses. Its 30 raw samples reconciled and peak generator CPU was 9.247% of four-core 400% capacity. The new Express/Laravel session validated 7,416,673 timed responses and audited 85,582 acknowledged writes, with zero request errors or invalid responses; its peak generator CPU was 59.960%. All 60 raw warmup/timed samples reconciled against per-application/round exact database/FTS audits.
+All applications run serially on CPUs 8–11; the generator uses 12–15. CPU percentages use 100% per occupied core, with 400% available across the generator’s four CPUs; they are not normalized to that capacity. Builds, tests and other benchmarks stop during timing. The final Rails session validated 410,853 timed responses and audited 9,307 exact acknowledged writes including warmup, with zero errors or invalid responses. Its 30 raw samples reconciled and peak generator CPU was 9.013% (400% available across four cores). The new Express/Laravel session validated 7,416,673 timed responses and audited 85,582 acknowledged writes, with zero request errors or invalid responses; its peak generator CPU was 59.960%. All 60 raw warmup/timed samples reconciled against per-application/round exact database/FTS audits.
 
 Observed minimum–maximum requests/sec:
 
 | Implementation | Room page | Messages page | Sidebar | Search | Post a message |
 |---|---:|---:|---:|---:|---:|
-| Rails | 4,113–4,159 | 3,870–4,118 | 4,143–4,268 | 4,138–4,286 | 322–326 |
-| Django | 478–484 | 485–490 | 599–605 | 593–599 | 112–114 |
+| Rails | 4,093–4,140 | 3,983–4,137 | 4,264–4,346 | 4,143–4,390 | 329–337 |
+| Django | 1,441–1,548 | 1,481–1,667 | 1,828–1,888 | 1,786–1,921 | 249–263 |
 | Laravel | 3,847–3,919 | 3,970–4,031 | 4,464–4,522 | 4,146–4,201 | 794–797 |
 | Express | 42,203–43,372 | 73,931–74,879 | 92,055–94,338 | 66,159–85,572 | 2,078–2,176 |
 | Elixir | 5,342–5,360 | 5,686–5,717 | 5,923–5,982 | 5,821–5,937 | 1,278–1,298 |
@@ -31,25 +31,25 @@ Observed minimum–maximum requests/sec:
 | Rust | 105,504–107,910 | 102,687–103,274 | 119,011–121,793 | 120,984–124,036 | 7,988–8,038 |
 | C | 136,404–139,097 | 143,942–149,113 | 151,566–152,698 | 148,288–151,008 | 7,512–7,556 |
 
-Rails uses four Puma workers with one request thread each and retains three Resque workers. The cache budgets remain per process, so this worker layout changes aggregate memory and cache capacity. Laravel retains FrankenPHP/Octane, its ReactPHP Cable server, and leased auxiliary SQLite jobs. The prior published Rails topology and current topology are part of the configuration comparison; the result does not isolate a language, a single optimization, Ruby, or Puma.
+Rails uses four Puma workers with one request thread each. Its native Resque pool selects two job workers on the four allocated CPUs, plus one pool manager. The `JOB_CONCURRENCY` environment variable does not control that pool; its unchanged YAML uses half of the available processors, rounded up. The cache budgets remain per process, so this worker layout changes aggregate memory and cache capacity. Laravel retains FrankenPHP/Octane, its ReactPHP Cable server, and leased auxiliary SQLite jobs. The prior published Rails topology and current topology are part of the configuration comparison; the result does not isolate a language, a single optimization, Ruby, or Puma.
 
 ## Reads with a paced message writer
 
-This separate profile uses 16 read clients plus one writer capped at ten messages/sec, without catch-up bursts. It uses the same warmup, three eight-second samples, fixture and CPU allocations as the normal profile. Both current Rails profiles use final `4bcc745` and its identical frozen production image in three solo rounds. Express and Laravel use their separate alternating three-round sessions; the five other columns retain their earlier published profile.
+This separate profile uses 16 read clients plus one writer capped at ten messages/sec, without catch-up bursts. It uses the same warmup, three eight-second samples, fixture and CPU allocations as the normal profile. Both current Rails profiles use final `0aa339d` and its identical frozen production image in three solo rounds. Express and Laravel use their separate alternating three-round sessions; Django uses its later three-round, four-worker session; the four other columns retain their earlier published profile.
 
 | Mixed HTTP workload (read requests/sec) | Rails | Django | Laravel | Express | Elixir | Go | Rust | C |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Room page | 1,799 | 58 | 2,277 | 37,831 | 1,438 | 48,465 | 99,660 | 130,733 |
-| Messages page | 2,489 | 61 | 2,472 | 66,668 | 1,694 | 49,902 | 98,055 | 137,520 |
-| Sidebar | 3,296 | 236 | 3,896 | 88,594 | 5,602 | 59,331 | 117,710 | 149,740 |
-| Search | 2,909 | 107 | 3,371 | 76,695 | 4,009 | 58,944 | 117,919 | 145,166 |
+| Room page | 2,222 | 438 | 2,277 | 37,831 | 1,438 | 48,465 | 99,660 | 130,733 |
+| Messages page | 2,640 | 537 | 2,472 | 66,668 | 1,694 | 49,902 | 98,055 | 137,520 |
+| Sidebar | 3,697 | 1,590 | 3,896 | 88,594 | 5,602 | 59,331 | 117,710 | 149,740 |
+| Search | 3,402 | 1,118 | 3,371 | 76,695 | 4,009 | 58,944 | 117,919 | 145,166 |
 
 The writer posts to HQ while room/message reads target Watercooler. Global SQLite epochs invalidate these read pages even when the write belongs to another room. Sidebar and search retain their normal scopes. This measures cross-room invalidation and concurrent writes; it does not model every reader following one actively written room or WebSocket fanout.
 
 | Implementation | Timed acknowledged writes | Writes per sample (min–max) | Writes/sec (min–max) |
 |---|---:|---:|---:|
-| Rails | 960 | 80–80 | 9.9–10.0 |
-| Django | 830 | 65–79 | 8.0–9.9 |
+| Rails | 959 | 79–80 | 9.8–10.0 |
+| Django | 958 | 79–80 | 9.9–10.0 |
 | Laravel | 960 | 80–80 | 9.9–10.0 |
 | Express | 960 | 80–80 | 9.9–9.9 |
 | Elixir | 960 | 80–80 | 9.9–10.0 |
@@ -57,14 +57,14 @@ The writer posts to HQ while room/message reads target Watercooler. Global SQLit
 | Rust | 960 | 80–80 | 9.9–9.9 |
 | C | 960 | 80–80 | 9.9–9.9 |
 
-The final Rails session validated 260,918 timed reads and 960 timed writes with zero errors or invalid responses. Its database/FTS audit reconciled 1,182 acknowledged writes, including 222 warmup writes, across 24 raw samples; peak combined generator CPU was 7.815%. The new Express/Laravel session validated 6,748,264 timed reads and 1,920 timed writes, and audited 2,400 acknowledged writes including 480 warmup writes, with zero request errors or invalid responses. Peak combined generator CPU was 56.294% of its four-core 400% capacity. The writer cap is a requested maximum; achieved cadence is reported above. All 48 raw warmup/timed samples reconciled against exact database/FTS audits. Both sources were clean and matched the same image revision labels used in the normal session.
+The final Rails session validated 287,035 timed reads and 959 timed writes with zero errors or invalid responses. Its database/FTS audit reconciled 1,186 acknowledged writes, including 227 warmup writes, across 24 raw samples; peak combined generator CPU was 8.173%. The new Express/Laravel session validated 6,748,264 timed reads and 1,920 timed writes, and audited 2,400 acknowledged writes including 480 warmup writes, with zero request errors or invalid responses. Peak combined generator CPU was 56.294% (400% available across four cores). The writer cap is a requested maximum; achieved cadence is reported above. All 48 raw warmup/timed samples reconciled against exact database/FTS audits. Both sources were clean and matched the same image revision labels used in the normal session.
 
 Observed mixed read minimum–maximum requests/sec:
 
 | Implementation | Room page | Messages page | Sidebar | Search |
 |---|---:|---:|---:|---:|
-| Rails | 1,709–2,131 | 2,365–2,618 | 3,285–3,615 | 2,858–3,366 |
-| Django | 55–58 | 59–61 | 216–237 | 105–108 |
+| Rails | 2,197–2,226 | 2,628–2,698 | 3,655–3,704 | 3,247–3,411 |
+| Django | 414–456 | 526–584 | 1,561–1,613 | 1,063–1,224 |
 | Laravel | 2,243–2,304 | 2,406–2,481 | 3,754–4,053 | 3,303–3,388 |
 | Express | 36,645–39,341 | 64,028–67,281 | 87,896–88,957 | 75,883–77,602 |
 | Elixir | 1,378–1,526 | 1,650–1,713 | 5,554–5,610 | 3,930–4,031 |
@@ -72,34 +72,34 @@ Observed mixed read minimum–maximum requests/sec:
 | Rust | 99,370–100,957 | 98,012–98,126 | 117,399–119,116 | 116,797–118,859 |
 | C | 130,011–130,879 | 137,449–137,649 | 148,506–151,328 | 145,105–145,584 |
 
-The final Rails mixed results are lower than the earlier completed phase. Both phases used the same HTTP contracts, fixture and topology; the final figures above remain the current results. These are separate sessions, so this difference does not isolate the checkpoint shutdown change.
+Rails mixed results vary across completed phases. All three use the same HTTP contracts, fixture and topology, but separate sessions; the current `0aa339d` figures remain the table results. These differences do not isolate the checkpoint shutdown change or the empty-mentions shortcut.
 
-| Rails mixed workload | Earlier `7331d3a` median (range) | Final `4bcc745` median (range) |
-|---|---:|---:|
-| Room page | 2,190 (2,180–2,276) | 1,799 (1,709–2,131) |
-| Messages page | 2,709 (2,488–2,735) | 2,489 (2,365–2,618) |
-| Sidebar | 3,663 (3,656–3,702) | 3,296 (3,285–3,615) |
-| Search | 3,334 (3,126–3,368) | 2,909 (2,858–3,366) |
+| Rails mixed workload | Earlier `7331d3a` median (range) | Checkpoint-stage `4bcc745` median (range) | Current `0aa339d` median (range) |
+|---|---:|---:|---:|
+| Room page | 2,190 (2,180–2,276) | 1,799 (1,709–2,131) | 2,222 (2,197–2,226) |
+| Messages page | 2,709 (2,488–2,735) | 2,489 (2,365–2,618) | 2,640 (2,628–2,698) |
+| Sidebar | 3,663 (3,656–3,702) | 3,296 (3,285–3,615) | 3,697 (3,655–3,704) |
+| Search | 3,334 (3,126–3,368) | 2,909 (2,858–3,366) | 3,402 (3,247–3,411) |
 
-A short room-only control ran old/new/new/old, with two five-second rounds per block. Pooled old/new medians were 1,882.95 and 1,884.25 requests/sec, with overlapping ranges of 1,799.9–2,129.9 and 1,789.4–2,141.4. Its 16 raw samples reconciled 77,897 timed reads, 398 timed writes and 513 total acknowledged writes with zero errors; peak generator CPU was 8.182%. It does not establish an isolated checkpoint throughput change and does not replace the lower final three-round results.
+A short room-only control ran old/new/new/old, with two five-second rounds per block. Pooled old/new medians were 1,882.95 and 1,884.25 requests/sec, with overlapping ranges of 1,799.9–2,129.9 and 1,789.4–2,141.4. Its 16 raw samples reconciled 77,897 timed reads, 398 timed writes and 513 total acknowledged writes with zero errors; peak generator CPU was 8.182%. It does not establish an isolated checkpoint throughput change and does not replace the current three-round results.
 
 ## Compared with the previous published configuration
 
-The five unchanged headline and mixed columns are retained, so no new before/after claim is made for them. The complete older eight-implementation comparison, historical architecture-transfer figures and earlier attribution remain in the [pinned published report](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md). The figures below compare complete Rails/Express/Laravel configurations with that report and retain regressions.
+The four unchanged headline and mixed columns are retained, so no new before/after claim is made for them. Django’s separate code/topology controls are reported below. The complete older eight-implementation comparison, historical architecture-transfer figures and earlier attribution remain in the [pinned published report](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md). The figures below compare complete Rails/Express/Laravel configurations with that report and retain regressions.
 
 | Implementation | Room page | Messages page | Sidebar | Search | Post a message |
 |---|---:|---:|---:|---:|---:|
-| Rails | 2,063 → 4,132 (2.00×) | 2,063 → 4,035 (1.96×) | 2,545 → 4,257 (1.67×) | 2,528 → 4,216 (1.67×) | 234 → 325 (1.39×) |
+| Rails | 2,063 → 4,101 (1.99×) | 2,063 → 4,115 (1.99×) | 2,545 → 4,333 (1.70×) | 2,528 → 4,282 (1.69×) | 234 → 330 (1.41×) |
 | Laravel | 3,038 → 3,872 (1.27×) | 3,081 → 3,995 (1.30×) | 3,832 → 4,493 (1.17×) | 3,710 → 4,172 (1.12×) | 577 → 794 (1.38×) |
 | Express | 43,925 → 42,636 (0.97×) | 74,176 → 74,362 (1.00×) | 94,322 → 94,329 (1.00×) | 82,937 → 84,665 (1.02×) | 2,098 → 2,155 (1.03×) |
 
 | Mixed reads | Room page | Messages page | Sidebar | Search |
 |---|---:|---:|---:|---:|
-| Rails | 219 → 1,799 (8.22×) | 221 → 2,489 (11.26×) | 2,046 → 3,296 (1.61×) | 1,009 → 2,909 (2.88×) |
+| Rails | 219 → 2,222 (10.15×) | 221 → 2,640 (11.95×) | 2,046 → 3,697 (1.81×) | 1,009 → 3,402 (3.37×) |
 | Laravel | 1,758 → 2,277 (1.30×) | 1,862 → 2,472 (1.33×) | 3,377 → 3,896 (1.15×) | 2,973 → 3,371 (1.13×) |
 | Express | 37,455 → 37,831 (1.01×) | 65,935 → 66,668 (1.01×) | 87,999 → 88,594 (1.01×) | 75,347 → 76,695 (1.02×) |
 
-The prior Rails mixed profile acknowledged 803 timed writes (47–80 per sample, 5.7–10.0/sec), compared with the current 960 (80 per sample, 9.9–10.0/sec). Laravel acknowledged 960 in the completed control profile; its new cadence is shown above. Different achieved cadence and cache churn prevent treating the mixed ratios as an isolated cache benchmark. The unmodified published ranges and writer rates are preserved above for the five untouched implementations.
+The prior Rails mixed profile acknowledged 803 timed writes (47–80 per sample, 5.7–10.0/sec), compared with the current 959 (79–80 per sample, 9.8–10.0/sec). Laravel acknowledged 960 in the completed control profile; its new cadence is shown above. Different achieved cadence and cache churn prevent treating the mixed ratios as an isolated cache benchmark. The unmodified published ranges and writer rates are preserved above for the four untouched implementations.
 
 ## What changed
 
@@ -111,9 +111,47 @@ Whole-page and fragment budgets remain separate, bounded per-worker caches. Comp
 
 Laravel checks membership afresh on every cache hit using a narrow existence query and loads the Room model only on a miss. Unchanged native session reads avoid rewriting the session file/cookie until the half-lifetime refresh boundary, and the permanent last-room cookie changes only when the room changes. Creation retains already-known relationships, directly inserts new rich text/search rows, and batches ordered room/unread outbox appends under one lock. Integration corrections keep message, rich text, FTS and unread updates atomic, resolve SGID-backed mention plain text after taking the write lock, and transfer Rails #336's first-unread policy for shared rooms. Existing pre-authentication snapshots, admission checks, bounds, gzip and foreign-writer controls remain.
 
+### Rails empty-mentions shortcut
+
+The selected [Rails #348](https://github.com/basecamp/once-campfire/pull/348) changes one runtime method. When native mention extraction returns no user IDs, `Message#mentionees` returns the chainable `User.none` relation without loading the room. Actual mentions keep the existing query through the room’s current users; native Action Text parsing, FTS, push delivery and transactions are unchanged.
+
+Short serial controls used two five-second rounds per block and four samples per configuration. The four-configuration screen ran baseline/prepared/raw/combined/combined/raw/prepared/baseline; the final isolated control ran baseline/empty/empty/baseline. These are separate controls, so each row uses its own matched baseline:
+
+| Rails candidate | Baseline posts/sec (range) | Candidate posts/sec (range) | Change |
+|---|---:|---:|---:|
+| Prepared FTS plus nil-unfurl guard | 326.35 (321.1–329.3) | 324.35 (320.7–333.4) | −0.6% |
+| Above plus raw-HTML mention guard | 326.35 (321.1–329.3) | 324.85 (323.6–326.4) | −0.5% |
+| Above plus empty-mentions relation | 326.35 (321.1–329.3) | 337.5 (336.5–340.9) | +3.4% |
+| Empty-mentions relation alone, selected | 328.8 (320.6–330.6) | 339.95 (336.5–344.2) | +3.4% |
+
+The simpler isolated change retains the observed gain. The prepared/raw-HTML changes were not adopted. Earlier valid screens also found no gain from moving ordinary rich-text casting earlier or adding a push-subscription existence query. Bounded push batching was rejected because moving recipient selection before payload preparation would widen the membership-revocation window.
+
+The four-configuration screen validated 26,534 timed writes and audited 30,711 acknowledged message/FTS writes including warmups across 32 raw samples; peak generator CPU was 4.208%. The selected isolated control validated 13,475 timed writes and audited 15,588 acknowledged writes including warmups across 16 raw samples; peak generator CPU was 4.145%. Every response passed, with zero errors or invalid results. Source, image, fixture, generator and topology identities reconciled.
+
+All 579 native tests / 2,285 assertions passed with the two existing unsupported libvips-loader skips. Focused checks passed 55 tests / 261 assertions; RuboCop, Herb and Brakeman were clean. Regressions verify zero room SQL for an ordinary message, a chainable empty relation, moved messages and fresh membership changes. Fresh browser, cache 64/0, foreign-write, conditional, revoked-access, Fetch Metadata, legacy-cookie and signed-upload production checks passed against exact `0aa339d` / image `aabe3696`. The 591-source/904-image/313-asset byte audit identifies only `app/models/message/mentionee.rb` as a runtime change. An actual process-role check confirmed four Puma workers, two Resque job workers, one pool manager and Redis on CPUs 8–11. The gain remains modest; Rails has not reached Laravel’s posting throughput.
+
+### Django creation and worker controls
+
+Django canonicalizes pure HTML before taking the write lock; membership and database-backed mentions remain fresh inside the atomic message/rich-text/FTS/unread transaction. New messages skip nonexistent FTS deletes and empty relation reloads. HTTP and Cable reuse one exact rendered fragment. Ordered Cable publications use one Redis pipeline; individual fenced/retried jobs enter one durable queue transaction. Existing session IDs no longer draw unused random replacements.
+
+The shared first-unread policy comes from Marcello Costagliola’s [Rails #336](https://github.com/basecamp/once-campfire/pull/336), preparation/batching from Silvio Ney’s [Laravel #5](https://github.com/basecamp/once-campfire-laravel/pull/5), and created-fragment reuse from Paweł Stachula’s [Express #4](https://github.com/basecamp/once-campfire-express/pull/4).
+
+Short paired controls used old/new/new/old blocks, each with two five-second posting samples. These screen medians are separate from the final three-round table:
+
+| Django configuration | Baseline posts/sec (range) | Optimized posts/sec (range) | Change |
+|---|---:|---:|---:|
+| One worker | 114.0 (112.0–114.4) | 178.05 (173.2–180.7) | +56.2% |
+| Four workers with Redis | 187.2 (180.7–192.2) | 262.4 (255.6–268.5) | +40.2% |
+
+The one-worker control used the creation change; the later four-worker control also includes the small session guard. A separate final one-worker screen measured 179.3–180.9 posts/sec, which overlaps the creation-only range; no isolated throughput gain is attributed to avoiding the random call. Final normal and mixed figures use `89a0007` with four workers. Each worker retains a 64 MiB cache budget: aggregate capacity is now 256 MiB versus the former single worker’s 64 MiB. The headline comparison with the previous 112 posts/sec includes both code and topology changes.
+
+The final normal session validated 277,338 timed responses and audited 7,909 exact acknowledged writes including warmups across 48 raw samples; peak generator CPU was 3.356%. The mixed session validated 89,293 timed reads and 958 timed writes, auditing 1,198 writes including warmups across 24 raw samples; peak generator CPU was 2.474%. Every sample passed response contracts with zero errors or invalid responses. The writer achieved 79–80 writes per sample, 9.9–10.0/sec.
+
+All 75 native tests passed without skips, including pre-BEGIN membership revocation, current SGID names, real transaction rollback, upload dimensions, publication ordering and whole queue-batch rollback. Fresh one- and four-worker production gates passed browser flows, cache 64/0, foreign writes without timestamp changes, old conditionals and revoked sessions/memberships. Actual HTTP writers and WebSocket subscribers in different worker processes delivered the expected message; stale job lease tokens, revoked webhook membership, delivery after membership restoration and recorded retry/backoff were exercised. All 408 audited runtime and generated-asset files match the frozen image byte for byte. Metadata-only image corrections preserve identical filesystem layers; final OCI and environment revisions agree. Published Django [`0cf4c33`](https://github.com/basecamp/once-campfire-django/commit/0cf4c330ac3bda381946bdf50f5ffc298e11718e) adds README benchmarks and contract/credit documentation to measured `89a0007`; runtime files are unchanged. These are native and independent production checks, not a new Claude review or a claim of complete parity or granted WebPush delivery.
+
 ### Rails posting diagnostic
 
-A separate instrumented production ActionDispatch process at `4bcc745`, using frozen image `sha256:43ded52f63b5b4f25041214c961f652f9add69d15b395d1efc0acadb21df7d13`, validated 100 sequential POSTs after 20 warmups with real Redis and three Resque workers. Runtime source-byte checks matched. This exercises native creation, rendering and job delivery, without Puma/Thrust dispatch or wire gzip.
+A separate instrumented production ActionDispatch process at `4bcc745`, using frozen image `sha256:43ded52f63b5b4f25041214c961f652f9add69d15b395d1efc0acadb21df7d13`, validated 100 sequential POSTs after 20 warmups with real Redis and the native Resque pool. Its isolated diagnostic YAML configured three job workers, compared with the normal benchmark's native two-worker policy. The 590 audited runtime files matched the source; the diagnostic Resque YAML override was excluded from that byte comparison. This exercises native creation, rendering and job delivery, without Puma/Thrust dispatch or wire gzip.
 
 | Diagnostic per POST | Observed value |
 |---|---:|
@@ -125,14 +163,14 @@ A separate instrumented production ActionDispatch process at `4bcc745`, using fr
 
 Notification timings are inclusive and overlap; they must not be added together. The BEGIN-to-COMMIT interval includes any lock-acquisition wait and does not directly measure write-lock occupancy. Instrumentation adds overhead, and this sequential process is distinct from the 16-client HTTP benchmark; it does not establish the cause of the roughly 2.4× Laravel/Rails posting gap.
 
-Source and SQL traces identify narrower opportunities: Laravel retains known new-message relationships and prepares ordinary attachmentless plain text before its transaction, while resolving SGID-backed text inside it. Rails retains native Action Text callbacks inside creation and queries fresh boosts and attachment metadata during presentation. The timestamp-only message UPDATE is Action Text's native touch and averaged about 0.009 ms here; it is not a large measured SQL cost. Across all three diagnostic runs, 360 posts and 720 real jobs completed with zero job failures, no missing FTS rows or counter mismatches, and drained queues. These diagnostics change no runtime source or benchmark figures; raw profile artifacts remain uncommitted.
+Source and SQL traces identify narrower opportunities: Laravel retains known new-message relationships and prepares ordinary attachmentless plain text before its transaction, while resolving SGID-backed text inside it. Rails retains native Action Text callbacks inside creation and queries fresh boosts and attachment metadata during presentation. The timestamp-only message UPDATE is Action Text's native touch and averaged about 0.009 ms here; it is not a large measured SQL cost. Across all three diagnostic runs, 360 posts and 720 real jobs completed with zero job failures, no missing FTS rows or counter mismatches, and drained queues. The configuration override was confined to the isolated diagnostic; published application code and benchmark figures were unchanged. Raw profile artifacts remain uncommitted.
 
 ## Source, images and checks
 
 | Implementation | Measured source | Frozen image | Native checks |
 |---|---|---|---|
-| Rails | [`4bcc745`](https://github.com/basecamp/once-campfire/commit/4bcc745f7abbc1a2ab5c4914258c6d06da955f0f) | `sha256:43ded52f63b5b4f25041214c961f652f9add69d15b395d1efc0acadb21df7d13` | 577 / 2,265 assertions; earlier system 27 / 203 |
-| Django | [`04f1f27`](https://github.com/basecamp/once-campfire-django/commit/04f1f273f43ab3f0c66565082ca3fd31eb994ce6) | `sha256:1d1a7d4226d7881d418054dbde2c4ad258ac604faee01763eb91846af506c843` | 64 |
+| Rails | [`0aa339d`](https://github.com/basecamp/once-campfire/commit/0aa339d81e0501841e3f23f0dd6e9b2e06e6b60d) | `sha256:aabe36965de365d822a44eaad78f4ae0d6c4510090792b174c6b855411588f5c` | 579 / 2,285 assertions; current native/system CI passed |
+| Django | [`89a0007`](https://github.com/basecamp/once-campfire-django/commit/89a00079e9199ba4e0318e69c668d2f0d70b144e) | `sha256:e1b063a9c62c7bee4e6677809128087322bedd9705bb7ec490f88f55d548ae0e` | 75; no skips |
 | Laravel | [`3b4a889`](https://github.com/basecamp/once-campfire-laravel/commit/3b4a889a13f4bf151d650f3887219f807607a642) | `sha256:8ad05414ed618f6f985d014b55aeef52a9916b1d9208c8f6dcf23785d11e4e8d` | 80 / 1,005 assertions; Pint 80 files |
 | Express | [`1fc0949`](https://github.com/basecamp/once-campfire-express/commit/1fc09490ae0958ede218d62297c20dbb9e0557cd) | `sha256:cd32e2d25410575ee206afc5f3cd46491bc2b26a6034da86cd6049353256df9a` | 158 Node + 158 Bun; formatter/assets |
 | Elixir | [`fa7f2ec`](https://github.com/basecamp/once-campfire-elixir/commit/fa7f2ecf89d560bb64a1c215e5693fa285c02705) | `sha256:947432c2355e89bba7dd660e3a5a12fc170d16d5c616d44674a49d8a8943225b` | 1961 |
@@ -140,23 +178,25 @@ Source and SQL traces identify narrower opportunities: Laravel retains known new
 | Rust | [`f9dca47`](https://github.com/basecamp/once-campfire-rust/commit/f9dca47e592fdcd23a75e4c8b6b97f5d452ccdc1) | `sha256:a368be61a026aa8f78d04019beb8bfb2870db53bf299ac2fa7cd116b6268d87f` | 795 passed; 11 existing ignores |
 | C | [`cd0cbe4`](https://github.com/basecamp/once-campfire-c/commit/cd0cbe4b24bcee0aa6ad75e6bc29d4e773628332) | `sha256:41da1ded88b26948a85780afc7ec8dc4bcc6082f8b7c70e8dfd26f9c94d2d404` | 1676 full historical native cases; current Fetch Metadata affected subset is separately recorded |
 
-The five untouched rows identify the exact source and image that produced their published timings. Later test/documentation-only changes, including Rust #42, do not replace those measured identifiers. Fresh current checks supplement earlier evidence rather than retroactively relabeling an old image.
+The four untouched rows identify the exact source and image that produced their published timings. Later test/documentation-only changes, including Rust #42, do not replace those measured identifiers. Fresh current checks supplement earlier evidence rather than retroactively relabeling an old image.
 
-Final normal and mixed measured Rails source: `4bcc745f7abbc1a2ab5c4914258c6d06da955f0f`; frozen image: `sha256:43ded52f63b5b4f25041214c961f652f9add69d15b395d1efc0acadb21df7d13`. New Express source: `1fc09490ae0958ede218d62297c20dbb9e0557cd`; frozen image: `sha256:cd32e2d25410575ee206afc5f3cd46491bc2b26a6034da86cd6049353256df9a`. New Laravel source: `3b4a889a13f4bf151d650f3887219f807607a642`; frozen image: `sha256:8ad05414ed618f6f985d014b55aeef52a9916b1d9208c8f6dcf23785d11e4e8d`. The image-label/runtime byte audits and fresh production receipts are matched to these exact inputs. Published Rails [`6944a4a`](https://github.com/basecamp/once-campfire/commit/6944a4a79689b30046e52338cb7a2d2a7f99f598) adds only README changes to measured `4bcc745`; runtime files match, while their full repository trees differ. The current 591-file runtime byte audit passed. The selected Express 620-file and Laravel 420-file runtime byte audits passed. New Express/Laravel measured harness: [`70e612c`](https://github.com/basecamp/once-campfire-verification/commit/70e612c1770be352e94d8ccb74184dce74ea6d33). The completed normal session records both clean exact source heads and their matching immutable image revision labels; the mixed profile uses the same frozen inputs.
+Final normal and mixed measured Rails source: `0aa339d81e0501841e3f23f0dd6e9b2e06e6b60d`; frozen image: `sha256:aabe36965de365d822a44eaad78f4ae0d6c4510090792b174c6b855411588f5c`. New Express source: `1fc09490ae0958ede218d62297c20dbb9e0557cd`; frozen image: `sha256:cd32e2d25410575ee206afc5f3cd46491bc2b26a6034da86cd6049353256df9a`. New Laravel source: `3b4a889a13f4bf151d650f3887219f807607a642`; frozen image: `sha256:8ad05414ed618f6f985d014b55aeef52a9916b1d9208c8f6dcf23785d11e4e8d`. The image-label/runtime byte audits and fresh production receipts are matched to these exact inputs. Previously published Rails [`6944a4a`](https://github.com/basecamp/once-campfire/commit/6944a4a79689b30046e52338cb7a2d2a7f99f598) adds only README changes to measured `4bcc745`; runtime files match, while their full repository trees differ. The current 591-file runtime byte audit passed. The selected Express 620-file and Laravel 420-file runtime byte audits passed. New Express/Laravel measured harness: [`70e612c`](https://github.com/basecamp/once-campfire-verification/commit/70e612c1770be352e94d8ccb74184dce74ea6d33). The completed normal session records both clean exact source heads and their matching immutable image revision labels; the mixed profile uses the same frozen inputs.
 
-New measured harness: [`70e612c`](https://github.com/basecamp/once-campfire-verification/commit/70e612c1770be352e94d8ccb74184dce74ea6d33); generator SHA-256: `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`. The five retained measurements used harness [`b95d5a7`](https://github.com/basecamp/once-campfire-verification/commit/b95d5a7bfbc8ce1ae03d01d293d19dd719f0d86d) and generator `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`.
+Published Rails [`5796e5c`](https://github.com/basecamp/once-campfire/commit/5796e5c8379578693a289fb2b0c2f7f065fdaafb) differs from measured `0aa339d` only in its README. Published Django [`7eda14d`](https://github.com/basecamp/once-campfire-django/commit/7eda14d6ed5c0a1338f0f920cca1c6de208b0b48) differs from measured `89a0007` only in its README and contract/credit documentation. [Rails #348](https://github.com/basecamp/once-campfire/pull/348) and [Django #1](https://github.com/basecamp/once-campfire-django/pull/1) were merged with commit identity “GPT on behalf of DHH”. All eight implementation READMEs carry the identical current headline table.
 
-Seed SHA-256: `036edd6a07815bbddbfe60949d065caf777cee6f0c1a96e286e08c16e584c60c`. The completed Rails session uses the same generator hash as the five retained measurements; new Express/Laravel generator SHA-256: `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`. The additional harness changes are optional profiles/adapters and reporting/tests; the timed HTTP response and persisted-write contracts remain unchanged.
+New measured harness: [`70e612c`](https://github.com/basecamp/once-campfire-verification/commit/70e612c1770be352e94d8ccb74184dce74ea6d33); generator SHA-256: `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`. The four retained measurements used harness [`b95d5a7`](https://github.com/basecamp/once-campfire-verification/commit/b95d5a7bfbc8ce1ae03d01d293d19dd719f0d86d) and generator `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`.
 
-Final Rails has 577 native tests / 2,265 assertions and two unsupported-loader skips (`matload`, `niftiload`). The earlier `7331d3a` 27-case Chromium suite / 203 assertions passed with no skips; fresh final-source production controls validate the shutdown integration separately. Final-source RuboCop passed; the earlier integrated Herb and Brakeman checks remain additional evidence. The corrected libvips tests independently invoke forbidden loaders, rather than confusing loader discovery with loader execution. Ruby 4's separately built native gems and exporter archive were tested; no Ruby 3.4 ABI bundle was reused.
+Seed SHA-256: `036edd6a07815bbddbfe60949d065caf777cee6f0c1a96e286e08c16e584c60c`. The completed Rails session uses the same generator hash as the four retained measurements; new Express/Laravel generator SHA-256: `26ac5ed0a67b04867583c3745da4c266b417750fb2309e47bc3357c206735025`. The additional harness changes are optional profiles/adapters and reporting/tests; the timed HTTP response and persisted-write contracts remain unchanged.
+
+Final Rails has 579 native tests / 2,285 assertions and two unsupported-loader skips (`matload`, `niftiload`). The earlier `7331d3a` 27-case Chromium suite / 203 assertions passed with no skips; fresh final-source production controls validate the selected empty-mentions source separately. Final-source RuboCop, Herb and Brakeman passed. The selected source also passed [native/system CI](https://github.com/basecamp/once-campfire/actions/runs/37827658427) and both [production image builds](https://github.com/basecamp/once-campfire/actions/runs/37827658463). The corrected libvips tests independently invoke forbidden loaders, rather than confusing loader discovery with loader execution. Ruby 4's separately built native gems and exporter archive were tested; no Ruby 3.4 ABI bundle was reused.
 
 Laravel's current full suite has 80 tests / 1,005 assertions with zero skips, plus Pint 80 files and fresh production browser checks. Express passes 158 tests under Node and 158 under Bun with zero skips; the table measures Node, with no new Bun speed claim. The earlier Rails Chromium replay passed 27 tests / 203 assertions with no failures, errors or skips. Earlier published Rails [CI](https://github.com/basecamp/once-campfire/actions/runs/37770982879), [image build](https://github.com/basecamp/once-campfire/actions/runs/37770982884) and [push checks](https://github.com/basecamp/once-campfire/actions/runs/37770982474) all passed at the exact `2e89e08` head. The final shutdown integration also passed [CI at `6944a4a`](https://github.com/basecamp/once-campfire/actions/runs/37786003463), including native tests, system tests, lint and security checks.
 
 Fresh strict production gates cover setup, live messaging, editing, stored-markup safety, profiles/accounts, bots, styles, session transfers, joining and direct pings. Dedicated security/cache controls check Fetch Metadata, legacy installation cookies, signed-upload/session capabilities, gzip quality negotiation, cache64/0, no-timestamp foreign SQL body/creator/boost edits, stale conditional requests and revoked sessions/memberships. Migration controls validate historical counterless fixtures, trigger backfill and counter integrity after live flows. Final Express/Laravel production browser and signed-capability security controls passed with cache 64 and 0 against their selected images. Published [Express checks](https://github.com/basecamp/once-campfire-express/actions/runs/37783279609), [Express CI](https://github.com/basecamp/once-campfire-express/actions/runs/37783278323) and [Laravel CI](https://github.com/basecamp/once-campfire-laravel/actions/runs/37783283932) passed at those exact source heads. The earlier `7331d3a` Rails cache-disabled controls also passed; counter integrity remained exact after browser and foreign-SQL controls.
 
-Earlier failed attempts remain in local receipts. The initial four-worker cache-hit candidate exhausted the database pool; the final transaction guard was tested against both normal leasing and fixture-pinned transactions. A Puma 8 production browser attempt timed out waiting for a RoomMessages subscription while concurrent Chromium suites ran; quiet reruns passed against the same source/image. Successful final checks do not erase these attempts or establish that browsers never flake.
+Earlier failed attempts remain in local receipts. The initial four-worker cache-hit candidate exhausted the database pool; the final transaction guard was tested against both normal leasing and fixture-pinned transactions. A Puma 8 production browser attempt timed out waiting for a RoomMessages subscription while concurrent Chromium suites ran; quiet reruns passed against the same source/image. An earlier `ec1b32f` trial’s Chromium process crashed while `/tmp` had only 307 MiB free. Passing final checks used an owned `/var/tmp` browser workspace with every assertion unchanged. Successful final checks do not erase these attempts or establish that browsers never flake.
 
-Django and Elixir published full suites have no skips. Rust has 11 existing ignored timing/reference-export/doc cases and no missing-seed skips. C's full 1,676 native cases and current affected subset remain the evidence identified in the prior report. Historical Elixir parity, Rust multi-seed parity and C sanitizer/Fil-C inventories predate these latest changes; they were not all rerun. Each port retains its documented rich-text, media, push and upgrade limits.
+Django’s current 75-test native suite and Elixir’s published full suite have no skips. Rust has 11 existing ignored timing/reference-export/doc cases and no missing-seed skips. C's full 1,676 native cases and current affected subset remain the evidence identified in the prior report. Historical Elixir parity, Rust multi-seed parity and C sanitizer/Fil-C inventories predate these latest changes; they were not all rerun. Each port retains its documented rich-text, media, push and upgrade limits.
 
 A later [Rust CI run](https://github.com/basecamp/once-campfire-rust/actions/runs/37788583158) exposed a broadcast test assuming a fixed delivery order across independent subscriptions. The test-only correction in [`6838ead`](https://github.com/basecamp/once-campfire-rust/commit/6838ead05391bd287a3b0bdd14904d0a5b44ad8a) compares both complete expected frames, including channel identifiers and payloads, in either order. It retains subsequent ordering and silence checks. All 29 channel tests passed with one existing ignore, followed by 20 focused repetitions; formatting passed with the required seed present. The original test passed 100 isolated repetitions, so the CI failure was not reproduced locally. The [full seeded workspace CI](https://github.com/basecamp/once-campfire-rust/actions/runs/37792265290) then passed, including formatting, Clippy with warnings denied, dependency checks and benchmark contracts. Production code and benchmark figures are unchanged.
 
@@ -170,13 +210,27 @@ npx playwright install chromium
 bin/check
 bin/seed
 cargo build --release --locked --manifest-path loadgen/Cargo.toml
-export RAILS_BENCH_ENV='{"WEB_CONCURRENCY":"4","RAILS_MAX_THREADS":"1","RAILS_MIN_THREADS":"1","JOB_CONCURRENCY":"3"}'
+export RAILS_BENCH_ENV='{"WEB_CONCURRENCY":"4","RAILS_MAX_THREADS":"1","RAILS_MIN_THREADS":"1"}'
 bin/benchmark --apps rails,express,laravel --rounds 3 --duration 8 --concurrencies 16 \
   --cpus 8-11 --client-cpus 12-15 \
   --routes room_show,messages_page,sidebar,search,post_message
 bin/benchmark --apps rails,express,laravel --rounds 3 --duration 8 --concurrencies 16 \
   --cpus 8-11 --client-cpus 12-15 --mixed-write-rate 10 \
   --routes room_show,messages_page,sidebar,search
+```
+
+For the current Django topology, start an isolated Redis instance on the same server CPUs, then run Django alone. `DJANGO_IMAGE` must point at the reported revision’s production image:
+
+```sh
+docker run -d --name campfire-benchmark-redis --network host --cpuset-cpus 8-11 \
+  redis:7.2-alpine redis-server --bind 127.0.0.1 --port 25222 --save "" --appendonly no
+export DJANGO_BENCH_ENV='{"WEB_WORKERS":"4","REDIS_URL":"redis://127.0.0.1:25222/0"}'
+bin/benchmark --apps django --rounds 3 --duration 8 --concurrencies 16 \
+  --cpus 8-11 --client-cpus 12-15
+bin/benchmark --apps django --rounds 3 --duration 8 --concurrencies 16 \
+  --cpus 8-11 --client-cpus 12-15 --mixed-write-rate 10 \
+  --routes room_show,messages_page,sidebar,search
+docker rm -f campfire-benchmark-redis
 ```
 
 The standalone [verification repository](https://github.com/basecamp/once-campfire-verification) documents per-app image configuration and fresh disposable browser runs. Its lock prevents overlapping benchmark sessions. Run native/framework tests separately, then stop builds/tests/browser workloads before timing. Raw JSON, logs, seeds and runtime databases remain ignored local artifacts; this report commits only a Markdown result summary.
@@ -191,7 +245,7 @@ Databases/files run on `/tmp` tmpfs. Exact transaction/FTS persistence is verifi
 
 ## Independent review
 
-Claude (Opus 5.5) reviewed the earlier changes from all eight public implementations; reproduced gzip-quality and upload-metadata issues were fixed and verified as recorded in the [prior report](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md#independent-review). That review predates the additional Rails diff. A supplemental source review covered the specifically supplied `59e1c6d` snapshot. Independent checks against `2e89e08` confirmed that the checkpoint thread’s sleep/backoff and unbounded shutdown join could delay or stall shutdown/fork preparation. The correction is published in [`4bcc745`](https://github.com/basecamp/once-campfire/commit/4bcc745f7abbc1a2ab5c4914258c6d06da955f0f), followed by a README-only update at [`6944a4a`](https://github.com/basecamp/once-campfire/commit/6944a4a79689b30046e52338cb7a2d2a7f99f598). Sleep and retry backoff are interruptible; a five-second join deadline fails closed while retaining exclusive checkpoint-lock ownership. It does not cancel a blocked native SQLite I/O call. Focused controls passed 15 tests / 54 assertions; the full suite passed 577 tests / 2,265 assertions with the two documented libvips-loader skips, and RuboCop passed 325 files. Fresh production controls covered both four-worker/five-thread and four-worker/one-thread Puma layouts, with four Puma workers and two Resque workers: each worker had one checkpoint thread and the masters had none. The 591-file runtime byte audit passed. This correction is outside the supplied `59e1c6d` review. Both headline and mixed figures include the final `4bcc745` source. Its mixed throughput is lower than the earlier `7331d3a` phase; the full values and ranges are retained without attributing the difference to the shutdown correction. Other cache/token observations were already addressed or do not apply to current tokenless rendering. The newer Rails runtime/cache/message changes beyond the reviewed 59e1 subset remain outside that supplemental review; native and production checks are separate evidence.
+Claude (Opus 5.5) reviewed the earlier changes from all eight public implementations; reproduced gzip-quality and upload-metadata issues were fixed and verified as recorded in the [prior report](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md#independent-review). That review predates the additional Rails diff. A supplemental source review covered the specifically supplied `59e1c6d` snapshot. Independent checks against `2e89e08` confirmed that the checkpoint thread’s sleep/backoff and unbounded shutdown join could delay or stall shutdown/fork preparation. The correction is published in [`4bcc745`](https://github.com/basecamp/once-campfire/commit/4bcc745f7abbc1a2ab5c4914258c6d06da955f0f), followed by a README-only update at [`6944a4a`](https://github.com/basecamp/once-campfire/commit/6944a4a79689b30046e52338cb7a2d2a7f99f598). Sleep and retry backoff are interruptible; a five-second join deadline fails closed while retaining exclusive checkpoint-lock ownership. It does not cancel a blocked native SQLite I/O call. Focused controls passed 15 tests / 54 assertions; the full suite passed 577 tests / 2,265 assertions with the two documented libvips-loader skips, and RuboCop passed 325 files. Fresh production controls covered both four-worker/five-thread and four-worker/one-thread Puma layouts, with four Puma workers and two Resque workers: each worker had one checkpoint thread and the masters had none. The 591-file runtime byte audit passed. This correction is outside the supplied `59e1c6d` review. The headline and mixed figures at that stage used `4bcc745`; the current tables use the subsequent `0aa339d` empty-mentions change. The checkpoint-stage mixed throughput was lower than the earlier `7331d3a` phase; all three phases and ranges are retained without attributing their differences to the shutdown correction. Other cache/token observations were already addressed or do not apply to current tokenless rendering. The newer Rails runtime/cache/message changes beyond the reviewed 59e1 subset remain outside that supplemental review; native and production checks are separate evidence.
 
 ## Contributor credit
 
@@ -215,7 +269,7 @@ Accepted changes retain their contributors’ history. Merge commits use **GPT o
 
 Thomas Klemm’s [Rails #341](https://github.com/basecamp/once-campfire/pull/341), [#342](https://github.com/basecamp/once-campfire/pull/342), [#343](https://github.com/basecamp/once-campfire/pull/343) and [#344](https://github.com/basecamp/once-campfire/pull/344) are incorporated in the measured Rails source with their original contributor histories. They strengthen libvips loader-block tests, update the RuboCop toolchain, upgrade Puma to 8.0.2 and upgrade Ruby to 4.0.7. Independent integrated native/style/security, 27-case Chromium and exporter checks passed. The updated Ruby PR includes the same already-tested libvips and RuboCop changes: a source-only integration produces an identical runtime tree. The first two changes do not affect application throughput. Posted merge verification: [#341](https://github.com/basecamp/once-campfire/pull/341#issuecomment-6059070132), [#342](https://github.com/basecamp/once-campfire/pull/342#issuecomment-6059070543), [#343](https://github.com/basecamp/once-campfire/pull/343#issuecomment-6059070965), [#344](https://github.com/basecamp/once-campfire/pull/344#issuecomment-6059071349).
 
-Exploratory two-round, five-second comparisons found Puma 8 roughly flat and Ruby 4 about 9% faster for posting and modest read gains. These short comparisons guided candidate selection; they are not the final table or an isolated causal claim. The complete final Rails configuration, including its architectural changes and worker layout, is measured in the tables above. A further two-round native action-controls reuse experiment reached 323.0–333.7 posts/sec (median 328.35), overlapping its earlier baseline range; its extra identity-substitution machinery was not adopted. That experiment compared with the earlier `7331d3a` posting range of 319–328 requests/sec; the current final-source range is 322–326. The shutdown fix's final normal results overlap the earlier ranges, so no isolated throughput gain is attributed to that correction.
+Exploratory two-round, five-second comparisons found Puma 8 roughly flat and Ruby 4 about 9% faster for posting and modest read gains. These short comparisons guided candidate selection; they are not the final table or an isolated causal claim. The complete final Rails configuration, including its architectural changes and worker layout, is measured in the tables above. A further two-round native action-controls reuse experiment reached 323.0–333.7 posts/sec (median 328.35), overlapping its earlier baseline range; its extra identity-substitution machinery was not adopted. That experiment compared with the earlier `7331d3a` posting range of 319–328 requests/sec; the shutdown-stage range was 322–326. The current empty-mentions source measured 329–337 in the full normal profile. The shutdown fix's final normal results overlap the earlier ranges, so no isolated throughput gain is attributed to that correction.
 
 These proposals remain unmerged in full at the listed revisions:
 
