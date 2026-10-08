@@ -54,6 +54,8 @@ node test/autocomplete-json.mjs ../once-campfire-elixir/assets/overrides/lib/aut
 
 The browser flow creates and modifies accounts, rooms and messages. Run each implementation's own complete test suite as well: shared checks complement framework-specific tests and screenshot inventories.
 
+The HTTP client sends Fetch Metadata for browser writes and includes legacy CSRF tokens only when an older implementation provides them.
+
 Raw results, seeds and browser artifacts stay in ignored directories. Raw benchmark receipts are not committed. An HTTP throughput result does not measure concurrent users or WebSocket capacity.
 
 ## Provenance

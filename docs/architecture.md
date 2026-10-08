@@ -1,6 +1,6 @@
 # Architecture transfer inventory
 
-Source inspection of the eight implementations on October 7, 2026. This records
+Source inspection of the eight implementations on October 8, 2026. This records
 implemented mechanisms and remaining opportunities, not measured gains or complete
 behavioral parity. The optional mixed read/write profile measures cache churn separately
 from the normal comparison. New performance claims require production validation and
@@ -8,11 +8,11 @@ sequential measurements of the final source and images.
 
 | Implementation | Scoped bounded FTS probe and exact direct-room lookup | Authenticated versioned page cache | Cached representation | Background WAL checkpoint | Notification queue |
 |---|---|---|---|---|---|
-| Rails | SQL probe/fallback; grouped membership query | Read-only SQLite observer; fresh authentication/access and CSRF masks | HTML; compression remains in the front server | SQLite autocheckpoint | Redis/Resque |
-| Django | SQL probe/fallback; ORM grouped membership query | Read-only SQLite observer; fresh authentication/access and CSRF masks | HTML; normal middleware compression | SQLite autocheckpoint | Leased auxiliary SQLite |
-| Laravel | SQL probe/fallback; grouped membership query | Read-only SQLite observer; fresh authentication/access and session CSRF | HTML; FrankenPHP compression | SQLite autocheckpoint | Auxiliary SQLite |
+| Rails | SQL probe/fallback; grouped membership query | Read-only SQLite observer; fresh authentication/access | Completed HTML/gzip; immutable encoded bodies | SQLite autocheckpoint | Redis/Resque |
+| Django | SQL probe/fallback; ORM grouped membership query | Read-only SQLite observer; fresh authentication/access | Completed HTML/gzip; normal middleware fallback | SQLite autocheckpoint | Leased auxiliary SQLite |
+| Laravel | SQL probe/fallback; grouped membership query | Read-only SQLite observer; fresh authentication/access | Completed HTML/gzip; native server fallback | SQLite autocheckpoint | Auxiliary SQLite |
 | Express | SQL probe/fallback; grouped membership query | Local write epoch plus persistent connection's foreign-commit version; fresh authentication/access | Completed HTML and gzip; fragment deflate reuse | Dedicated checkpoint worker and writer fallback | Leased auxiliary SQLite, batched admission |
-| Elixir | SQL probe/fallback; grouped membership query | Dedicated database observer; fresh authentication/access and CSRF masks | HTML; normal Plug compression | SQLite autocheckpoint | Redis/Resque |
+| Elixir | SQL probe/fallback; grouped membership query | Dedicated database observer; fresh authentication/access | Completed HTML/gzip; normal Plug fallback | SQLite autocheckpoint | Redis/Resque |
 | Go | SQL probe/fallback; grouped membership query | Pinned read-only SQLite observer; fresh authentication/access | Completed HTML/gzip; immutable fragment/list/layout parts | SQLite autocheckpoint | Bounded in-process |
 | Rust | SQL probe/fallback; grouped membership query | Dedicated observer; fresh authentication/access | Completed bodies plus fragment deflate reuse | Dedicated checkpointer with writer fallback | Bounded in-process |
 | C | SQL probe/fallback; grouped membership query | Dedicated version source; fresh authentication/access on each lookup | Completed bodies and gzip | SQLite autocheckpoint | Bounded in-process |
@@ -36,15 +36,14 @@ do not invalidate a committed snapshot. Observer failures bypass the optional ca
 A page-cache miss must also avoid stale nested HTML after foreign SQL edits that leave record
 timestamps unchanged. Rails retains native ERB collection and Jbuilder caching in a separate
 64 MiB memory store per worker, keyed by the pre-authentication epoch, origin, mount path,
-format, locale and viewer/session context. HTML and stream fragments additionally isolate
-the raw CSRF secret. All request methods capture the epoch; detached broadcasts, whose
+format, locale and viewer/session context. All request methods capture the epoch;
+detached broadcasts, whose
 renderers do not run authentication callbacks, render without fragment caching. Shared
 Rails.cache and class-level rate-limit stores stay unchanged. Sixteen fixed render locks
 collapse concurrent cold page misses without an unbounded per-key lock map. Laravel
 captures the epoch on every route and shares one 64 MiB budget between completed pages and
-token-neutral native message/boost fragments; detached renders without a captured snapshot
-bypass reuse. Laravel and Elixir bypass their message/boost fragment memoization for the
-captured response. Elixir
+native message/boost fragments; detached renders without a captured snapshot
+bypass reuse. Elixir
 also namespaces native fallback fragments by the pre-render epoch and request host, including
 conditional requests and when whole-response caching is disabled; its existing store has a
 4,096-entry bound. Django renders its page body directly. Go, Rust and Express namespace nested fragments by the
@@ -61,16 +60,28 @@ C uses `CF_CACHE_BYTES` in bytes. The default is 64 MiB (`67,108,864` bytes in C
 disables response reuse. Budgets apply to each process or persistent worker, except
 C's shared process store. They account for cached payloads and entry overhead, rather than
 limiting total application memory. Nested fragment stores have their own existing bounds.
-Fresh framework token masks and session/cookie middleware remain outside reusable bodies.
-Rails, Django, Laravel and Elixir retain normal framework/front-server compression; Go, Rust,
-Express and C can retain completed compressed representations. Conditional requests and
-flash require the native response rules, not an authorization shortcut.
+Live session/cookie middleware remains outside reusable bodies. All eight implementations now
+protect unsafe browser writes with Fetch Metadata rather than generated CSRF tokens. Forms emit
+no token fields or meta tags, and the upload controller no longer reads a removed token tag.
+Complete HTML and selected gzip representations therefore remain reusable without mask hydration
+or replacement of arbitrary message content. Cache hits still authenticate and authorize against
+current records; conditional requests and flash retain native response rules.
+
+GET and HEAD skip forgery protection. Unsafe requests accept browser-generated `same-origin`
+and `same-site`; a provided Origin must match the effective URL, and null/foreign origins and
+cross-site/none/invalid metadata fail. Missing metadata is accepted only over plain HTTP without
+forced TLS. Each implementation retains its established trusted TLS/proxy boundary; Rails uses
+its installed header-only strategy and native header normalization. Real bot credentials and
+signed disk upload capabilities preserve existing native exceptions. Old signed/encrypted
+installation cookies and token-bearing tabs remain valid. HTTPS clients need Fetch Metadata;
+this changes the supported browser policy, rather than weakening response validation.
 
 Message pagination validators must describe the rendered response. Rails, Go, Rust and Elixir
 now derive pagination ETags from its actual content and omit timestamp-only Last-Modified
 headers. A compatible foreign SQLite writer can change rich text, names or boosts without
-touching the message timestamp, so a record-only validator can wrongly return 304. Fresh CSRF
-masks can change an HTML representation's ETag even when its visible message text is unchanged.
+touching the message timestamp, so a record-only validator can wrongly return 304. With no
+generated token mask in the representation, unchanged visible content does not need a new
+validator merely because another request rendered it.
 
 Worth considering next:
 
@@ -80,9 +91,6 @@ Worth considering next:
 - Persistent, serializable jobs for Go, Rust and C if crash-safe delivery is required.
   Graceful draining of an in-process queue is not durability. This is a product behavior
   change and requires retry, lease and idempotency contracts, not merely a faster queue.
-- Completed compressed-body reuse where CSRF masks currently require fresh identity HTML.
-  Preserve the framework's token policy; compressing an old mask or replacing arbitrary
-  message text is not a valid optimization. Measure whether compression is actually material.
 - Shared immutable broadcast frames where each subscriber still performs equivalent JSON
   encoding/compression. Preserve recipient authorization and bounded slow-client handling;
   Redis/IPC fanout and in-process fanout need different native implementations.
