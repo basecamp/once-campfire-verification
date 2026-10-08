@@ -39,6 +39,8 @@ Against a **fresh, disposable** running app:
 bin/browser --base http://127.0.0.1:3000
 ```
 
+Allow several hundred megabytes of free space in `/tmp` for browser runs. Playwright's default `--disable-dev-shm-usage` makes Chromium use temporary files for shared memory; this harness sets `TMPDIR` under `/tmp`. Low space can cause asset loads to fail with `ERR_INSUFFICIENT_RESOURCES` even when RAM is available.
+
 A dependency-free frontend regression can also check an implementation’s room-list controller:
 
 ```sh

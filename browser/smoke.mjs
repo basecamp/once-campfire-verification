@@ -10,6 +10,7 @@ const base = baseIndex < 0 ? null : process.argv[baseIndex + 1]
 if (!base || !/^https?:\/\//.test(base))
   throw new Error("--base must specify a disposable fresh server")
 const work = await mkdtemp("/tmp/campfire-browser-smoke-")
+const errors = []
 let browser
 try {
   let ready = false
@@ -28,7 +29,6 @@ try {
   const context = await browser.newContext({
     permissions: ["clipboard-read", "clipboard-write"],
   })
-  const errors = []
   async function settled(page) {
     await page.waitForFunction(() => !document.querySelector('form[aria-busy="true"], html[aria-busy="true"], turbo-frame[aria-busy="true"]'))
   }
@@ -448,6 +448,7 @@ try {
     "PASS: setup, two-tab live messaging, duplicate suppression, and stored-markup safety, copying message permalinks, editing, search, profile/account updates, QR codes, live room creation/renaming, bots, custom styles, session transfers, joining, and autocomplete-started direct pings in Chromium.",
   )
 } catch (error) {
+  if (errors.length) console.error(errors.join("\n"))
   for (const page of browser?.contexts()[0]?.pages() || []) {
     console.error(await page.locator("body").innerText())
     console.error(
