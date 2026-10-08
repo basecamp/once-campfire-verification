@@ -13,6 +13,7 @@ Measured with 16 concurrent clients on an AMD Ryzen AI MAX+ 395 with 32 GB RAM, 
 | Sidebar | 4,333 | 1,873 | 4,493 | 94,329 | 5,949 | 59,144 | 120,294 | 152,002 |
 | Search | 4,282 | 1,862 | 4,172 | 84,665 | 5,848 | 60,509 | 121,378 | 149,487 |
 | Post a message | 330 | 262 | 794 | 2,155 | 1,278 | 9,021 | 8,037 | 7,530 |
+| Application KLOC | 12.9 | 11.3 | 10.0 | 13.3 | 19.9 | 29.8 | 38.5 | 101.1 |
 
 Rails, Express and Laravel were remeasured in separate sessions on October 8, 2026 after their selected changes. The final Rails session runs three solo rounds; the separate Express/Laravel sessions alternate those two implementations for three rounds. Each uses two seconds of warmup and eight seconds per sample. Django was subsequently remeasured in a separate three-round session with four Uvicorn workers and Redis on the same four server CPUs. Its normal profile includes the five table workloads plus avatar, static CSS and health responses. The four untouched implementations (Elixir, Go, Rust and C) retain exactly their independently verified figures from the [previous published comparison](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md); they were not rerun for this update. All sessions use the same machine, CPU allocation, fixture, 16-client contracts and gzip. This current configuration table combines those sessions and does not imply a fresh simultaneous eight-build comparison.
 
@@ -32,6 +33,29 @@ Observed minimum–maximum requests/sec:
 | C | 136,404–139,097 | 143,942–149,113 | 151,566–152,698 | 148,288–151,008 | 7,512–7,556 |
 
 Rails uses four Puma workers with one request thread each. Its native Resque pool selects two job workers on the four allocated CPUs, plus one pool manager. The `JOB_CONCURRENCY` environment variable does not control that pool; its unchanged YAML uses half of the available processors, rounded up. The cache budgets remain per process, so this worker layout changes aggregate memory and cache capacity. Laravel retains FrankenPHP/Octane, its ReactPHP Cable server, and leased auxiliary SQLite jobs. The prior published Rails topology and current topology are part of the configuration comparison; the result does not isolate a language, a single optimization, Ruby, or Puma.
+
+## Application source size
+
+KLOC means 1,000 nonblank, noncomment physical source lines, rounded to one decimal. The counts use [cloc 2.10](https://github.com/AlDanial/cloc/tree/v2.10), with `--by-file --skip-uniqueness` (Eta/SVG templates treated as HTML and Jbuilder as Ruby), on selected application source. They include backend code, templates, runtime configuration, migrations/schema SQL, first-party frontend and application build support. They exclude tests, benchmark/parity tooling, documentation, dependencies, vendored libraries and generated source files. Framework/library internals are excluded in every language; these figures describe maintained application source, not the total code executing a request or a measure of feature coverage.
+
+The shared first-party JavaScript/CSS is counted once in each implementation, with that port's overrides replacing the corresponding logical files. Rails, Django, Express, Elixir, Go and Rust use the pinned source frontend rather than a second count of its compiled output. Laravel and C ship their first-party browser source under digested asset names: only files corresponding to the shared application frontend are counted, with vendor scripts, bundles and duplicate assets excluded. C's production asset inputs live under `tests/fixtures/assets`; those browser files are application code, while its actual tests remain excluded. The C libvips adapter and Elixir native adapters are included as first-party code.
+
+For Rust, `syn 2.0.119` parses the source to remove inline `#[cfg(test)]` modules/items, test-only fields/methods and instrumentation before cloc runs; external test modules, test data and the `test-support` fixture loaders are excluded too. Go's `_test.go` files and the other implementations' test trees are excluded. Generated routes, MIME/transliteration tables and database schema outputs are excluded as generated files, rather than being counted as handwritten application code.
+
+| Implementation | Counted source revision | Files | Code lines | Application KLOC |
+|---|---|---:|---:|---:|
+| Rails | [`0aa339d`](https://github.com/basecamp/once-campfire/tree/0aa339d81e0501841e3f23f0dd6e9b2e06e6b60d) | 390 | 12,873 | 12.9 |
+| Django | [`89a0007`](https://github.com/basecamp/once-campfire-django/tree/89a00079e9199ba4e0318e69c668d2f0d70b144e) | 125 | 11,324 | 11.3 |
+| Laravel | [`6d4d929`](https://github.com/basecamp/once-campfire-laravel/tree/6d4d929b07364ac9c23f7da66ec93dbec2f54b2c) | 196 | 9,989 | 10.0 |
+| Express | [`3f14e40`](https://github.com/basecamp/once-campfire-express/tree/3f14e40148ae96d015816178816347b1a28335ea) | 180 | 13,314 | 13.3 |
+| Elixir | [`20073fe`](https://github.com/basecamp/once-campfire-elixir/tree/20073fe759c1a6264cdfa4ab5c467a0b0553cce9) | 301 | 19,941 | 19.9 |
+| Go | [`a6c1359`](https://github.com/basecamp/once-campfire-go/tree/a6c13597c68ab76e8215ccc56aa2c29c6efe2142) | 243 | 29,792 | 29.8 |
+| Rust | [`6838ead`](https://github.com/basecamp/once-campfire-rust/tree/6838ead05391bd287a3b0bdd14904d0a5b44ad8a) | 407 | 38,541 | 38.5 |
+| C | [`ddaafaf`](https://github.com/basecamp/once-campfire-c/tree/ddaafaff4ad1d263f4808dbd6d4718bea6d194aa) | 323 | 101,064 | 101.1 |
+
+Source selection: Rails `app/`, `lib/`, runtime Ruby `config/`, `config.ru`, `db/migrate/` and public HTML; Django `campfire/` and `manage.py`; Laravel `app/`, `bootstrap/`, `config/`, `routes/`, migrations, `resources/`, `public/index.php` and `bin/cable`; Express `src/` and `templates/`; Elixir `lib/`, templates, public/PWA source and native adapters; Go `cmd/`, `internal/` and the assets adapter; Rust handwritten crate `src/`, templates and asset build modules; C handwritten `src/` plus its media adapter. Each includes the first-party browser source described above. Dynamic JSON/SVG templates are included; static JSON data, binary assets, generated asset copies and deployment/development scripts are excluded.
+
+The counted revisions match the current published application code; subsequent publication commits changed documentation only. Formatting, template structure and compatibility code affect physical line counts, so KLOC is useful context for the throughput table, not a language efficiency score.
 
 ## Reads with a paced message writer
 
