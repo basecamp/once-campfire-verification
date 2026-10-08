@@ -151,7 +151,7 @@ begin
       sleep 3 unless options[:preflight]
       cookie = lg.call("login", "--base", base, "--email", labels.fetch("emails.david"), "--password", labels.fetch("passwords.all")).fetch("cookie")
       scrape = lg.call("scrape", "--base", base, "--cookie", cookie, "--room", room.to_s)
-      # The load generator sends the rendered CSRF token and same-origin headers.
+      # Browser metadata protects current apps; tokens remain optional for historical references.
       csrf = scrape.fetch("csrf").to_s
       routes = { "room_show" => "/rooms/#{room}", "messages_page" => "/rooms/#{room}/messages?before=#{labels.fetch('messages.busy_060')}",
         "sidebar" => "/users/me/sidebar", "search" => "/searches?q=coffee", "avatar" => "/users/#{labels.fetch('avatar_tokens.jason')}/avatar",

@@ -156,12 +156,12 @@ fn cookie_header(jar: &[(String, String)]) -> String {
     jar.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
-/// The page's CSRF token: the Rails app renders one; the Rust app doesn't (it checks `Sec-Fetch-Site`).
+/// Optional token support for historical references; current apps use `Sec-Fetch-Site`.
 fn csrf_from(html: &str) -> Option<String> {
     regex::Regex::new(r#"<meta name="csrf-token" content="([^"]*)""#).unwrap().captures(html).map(|c| c[1].to_string())
 }
 
-/// What a browser sends with requests its pages make; the Rust app's forgery protection needs it.
+/// What a browser sends with requests its pages make.
 fn same_origin() -> (&'static str, String) {
     ("sec-fetch-site", "same-origin".into())
 }
@@ -176,7 +176,12 @@ async fn login(a: &Args) -> Res<Value> {
     let r = one_shot(&addr, "GET", "/session/new", &[], Bytes::new()).await?;
     merge_cookies(&mut jar, &r.headers);
     let token = csrf_from(&String::from_utf8_lossy(&r.body)).unwrap_or_default();
-    let body = form(&[("email_address", &a.get("email")), ("password", &a.get("password")), ("authenticity_token", &token)]);
+    let (email, password) = (a.get("email"), a.get("password"));
+    let mut fields = vec![("email_address", email.as_str()), ("password", password.as_str())];
+    if !token.is_empty() {
+        fields.push(("authenticity_token", &token));
+    }
+    let body = form(&fields);
     let r = one_shot(
         &addr,
         "POST",
@@ -248,17 +253,19 @@ fn nonce() -> String {
 }
 
 fn message_request(cookie: &str, csrf: &str, body_text: &str) -> (Vec<(&'static str, String)>, Bytes) {
-    let body = form(&[("message[body]", body_text), ("message[client_message_id]", &nonce()), ("authenticity_token", csrf)]);
-    (
-        vec![
-            ("cookie", cookie.to_string()),
-            ("content-type", "application/x-www-form-urlencoded".into()),
-            ("accept", "text/vnd.turbo-stream.html, text/html, application/xhtml+xml".into()),
-            ("x-csrf-token", csrf.to_string()),
-            same_origin(),
-        ],
-        body,
-    )
+    let client_id = nonce();
+    let mut fields = vec![("message[body]", body_text), ("message[client_message_id]", client_id.as_str())];
+    let mut headers = vec![
+        ("cookie", cookie.to_string()),
+        ("content-type", "application/x-www-form-urlencoded".into()),
+        ("accept", "text/vnd.turbo-stream.html, text/html, application/xhtml+xml".into()),
+        same_origin(),
+    ];
+    if !csrf.is_empty() {
+        fields.push(("authenticity_token", csrf));
+        headers.push(("x-csrf-token", csrf.to_string()));
+    }
+    (headers, form(&fields))
 }
 
 async fn http_load(a: &Args) -> Res<Value> {
@@ -1012,7 +1019,10 @@ async fn upload(a: &Args) -> Res<Value> {
     for _ in 0..reps {
         let boundary = format!("----bench{}", nonce());
         let mut body = Vec::new();
-        for (k, v) in [("authenticity_token", csrf.as_str()), ("message[client_message_id]", &nonce())] {
+        for (k, v) in [("authenticity_token", csrf.as_str()), ("message[client_message_id]", &nonce())]
+            .into_iter()
+            .filter(|(k, v)| *k != "authenticity_token" || !v.is_empty())
+        {
             body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
         }
         body.extend(
@@ -1022,20 +1032,16 @@ async fn upload(a: &Args) -> Res<Value> {
         body.extend(&data);
         body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
         let t0 = Instant::now();
-        let r = one_shot(
-            &addr,
-            "POST",
-            &format!("/rooms/{room}/messages"),
-            &[
-                ("cookie", cookie.clone()),
-                ("content-type", format!("multipart/form-data; boundary={boundary}")),
-                ("accept", "text/vnd.turbo-stream.html, text/html".into()),
-                ("x-csrf-token", csrf.clone()),
-                same_origin(),
-            ],
-            Bytes::from(body),
-        )
-        .await?;
+        let mut headers = vec![
+            ("cookie", cookie.clone()),
+            ("content-type", format!("multipart/form-data; boundary={boundary}")),
+            ("accept", "text/vnd.turbo-stream.html, text/html".into()),
+            same_origin(),
+        ];
+        if !csrf.is_empty() {
+            headers.push(("x-csrf-token", csrf.clone()));
+        }
+        let r = one_shot(&addr, "POST", &format!("/rooms/{room}/messages"), &headers, Bytes::from(body)).await?;
         let post_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let html = String::from_utf8_lossy(&r.body).to_string();
         let Some(src) = img_re.captures(&html).map(|c| unescape(&c[1])) else {
@@ -1153,6 +1159,17 @@ async fn main() {
 mod validation_integration_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn browser_posts_need_no_csrf_fields_and_legacy_tokens_remain_optional() {
+        let (headers, body) = message_request("session_token=signed", "", "hello");
+        assert!(headers.iter().any(|(name, value)| *name == "sec-fetch-site" && value == "same-origin"));
+        assert!(!headers.iter().any(|(name, _)| *name == "x-csrf-token"));
+        assert!(!String::from_utf8_lossy(&body).contains("authenticity_token"));
+        let (headers, body) = message_request("session_token=signed", "legacy", "hello");
+        assert!(headers.iter().any(|(name, value)| *name == "x-csrf-token" && value == "legacy"));
+        assert!(String::from_utf8_lossy(&body).contains("authenticity_token=legacy"));
+    }
 
     #[tokio::test]
     async fn mixed_writer_is_paced_validated_and_audited_separately() {
