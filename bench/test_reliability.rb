@@ -16,6 +16,7 @@ class ReliabilityTest < Minitest::Test
       [[%w[--profiles cable,soak], "profiles must be nonempty"],
        [%w[--overload-routes post_message], "overload routes must be read routes"],
        [%w[--apps rails,rails], "apps must be nonempty, unique and supported"],
+       [%w[--overload-concurrencies ,], "counts and durations must be positive"],
        [%w[--cable-heavy-posters -1], "cable-heavy-posters must be zero or positive"]].each do |args, message|
         _, errors, status = reliability(*args, directory: directory)
         refute status.success?

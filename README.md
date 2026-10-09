@@ -48,7 +48,9 @@ bin/reliability --apps rails,elixir,go,rust --profiles overload,cable
   container with `--cable-heavy-posters` closed-loop posters (default 64; 0 skips it), reported as
   `cable_heavy`. Clients do not reconnect, so a disconnected client misses every later message.
 
-Results go to `reliability-summary.json` with every round's raw values.
+Each run writes to `tmp/bench/reliability/<timestamp>-<pid>/` (or `--output`): every round's raw
+results in `<app>-<round>.json`, container logs in `<app>-<profile>-<round>.log`, and the medians
+with each round's failure counts in `reliability-summary.json`.
 
 Against a **fresh, disposable** running app:
 

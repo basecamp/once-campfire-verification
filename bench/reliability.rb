@@ -34,9 +34,10 @@ profiles = options[:profiles].split(",")
 raise "profiles must be nonempty and among overload, cable" unless !profiles.empty? && (profiles - %w[overload cable]).empty?
 overload_routes = options[:overload_routes].split(",")
 raise "overload routes must be read routes" unless !overload_routes.empty? && (overload_routes - %w[room_show messages_page sidebar search]).empty?
+overload_concurrencies = options[:overload_concurrencies].split(",").map { |value| Integer(value) }
 raise "counts and durations must be positive" unless [options[:rounds], options[:overload_duration], options[:cable_clients],
   options[:cable_tput_secs], options[:cable_posters]].all?(&:positive?) &&
-  options[:overload_concurrencies].split(",").all? { |value| Integer(value).positive? }
+  !overload_concurrencies.empty? && overload_concurrencies.all?(&:positive?)
 raise "cable-heavy-posters must be zero or positive" if options[:cable_heavy_posters].negative?
 raise "output already exists: #{options[:output]}" if File.exist?(options[:output])
 
@@ -68,8 +69,10 @@ start_app = ->(app, data) do
   image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
   raise "#{app}: image changed between runs" if metadata[:images].key?(app) && metadata[:images][app] != image_id
   metadata[:images][app] = image_id
-  metadata[:source_revisions][app] ||= { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
+  source_identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
     dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
+  raise "#{app}: source changed between runs" if metadata[:source_revisions].key?(app) && metadata[:source_revisions][app] != source_identity
+  metadata[:source_revisions][app] = source_identity
   prepare_storage(options[:seed], data)
   FileUtils.mkdir_p(File.join(data, "logs"))
   db = File.join(data, "db/production.sqlite3")
@@ -103,9 +106,9 @@ overload = ->(app, data) do
     "sidebar" => "/users/me/sidebar", "search" => "/searches?q=coffee" }
   overload_routes.flat_map do |name|
     lg.("http", "--base", base, "--cookie", cookie, "--path", paths.fetch(name), "--validate", contracts.fetch(name), "--conc", "4", "--duration", "2")
-    options[:overload_concurrencies].split(",").map do |concurrency|
+    overload_concurrencies.map do |concurrency|
       value = lg.("http", "--base", base, "--cookie", cookie, "--path", paths.fetch(name), "--validate", contracts.fetch(name),
-        "--conc", concurrency, "--duration", options[:overload_duration].to_s)
+        "--conc", concurrency.to_s, "--duration", options[:overload_duration].to_s)
       puts "#{app}: overload #{name} #{concurrency} clients #{value.fetch('rps')} valid req/s, #{value.fetch('errors')} errors, #{value.fetch('invalid_responses')} invalid"
       STDOUT.flush
       value.slice("conc", "rps", "ok", "errors", "invalid_responses", "invalid_reasons", "statuses", "latency").merge("route" => name)

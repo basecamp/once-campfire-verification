@@ -519,6 +519,17 @@ fn markers(text: &str) -> Vec<u64> {
     out
 }
 
+/// Counts an established client as disconnected when it ends before the run stops, however it ends.
+struct DisconnectGuard(Arc<AtomicBool>, Arc<Delivery>);
+
+impl Drop for DisconnectGuard {
+    fn drop(&mut self) {
+        if !self.0.load(Ordering::Relaxed) {
+            self.1.disconnected.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cable_client(
     addr: String,
@@ -560,6 +571,7 @@ async fn cable_client(
         eprintln!("connected");
     }
     connected.fetch_add(1, Ordering::Relaxed);
+    let _disconnect = DisconnectGuard(stop.clone(), delivery.clone());
     let (mut tx, mut rx) = ws.split();
     for ident in &subs {
         tx.send(WsMessage::text(json!({"command": "subscribe", "identifier": ident}).to_string())).await?;
@@ -604,9 +616,6 @@ async fn cable_client(
         {
             refresh_timer = Some(presence_timer(period, phase));
         }
-    }
-    if !stop.load(Ordering::Relaxed) {
-        delivery.disconnected.fetch_add(1, Ordering::Relaxed);
     }
     let _ = tx.send(WsMessage::Close(None)).await;
     Ok(())
@@ -770,6 +779,7 @@ async fn deflate_cable_client(
         compressed |= line.to_ascii_lowercase().starts_with("sec-websocket-extensions:") && line.contains("permessage-deflate");
     }
     connected.fetch_add(1, Ordering::Relaxed);
+    let _disconnect = DisconnectGuard(stop.clone(), delivery.clone());
     for ident in &subs {
         let payload = json!({"command": "subscribe", "identifier": ident}).to_string();
         write.write_all(&masked_text_frame(payload.as_bytes())).await?;
@@ -825,9 +835,6 @@ async fn deflate_cable_client(
             std::str::from_utf8(&payload)?
         };
         on_text(message, subs.len(), &mut confirms, &mut seen, &confirmed, &delivery);
-    }
-    if !stop.load(Ordering::Relaxed) {
-        delivery.disconnected.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
 }
