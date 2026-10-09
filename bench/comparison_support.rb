@@ -43,6 +43,38 @@ module BenchmarkSupport
     values.length.odd? ? values[middle] : (values[middle - 1] + values[middle]) / 2.0
   end
 
+  IMAGES = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
+
+  def image_name(app)
+    ENV.fetch("#{app.upcase.tr('-', '_')}_IMAGE", IMAGES.fetch(app, "once-campfire-#{app}:app"))
+  end
+
+  def source_dir(workspace, app)
+    kind = app.delete_suffix("-bun")
+    File.join(workspace, kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
+  end
+
+  # Working set matches `docker stats`: usage minus reclaimable inactive file cache.
+  # Peak is the kernel's high-water mark and includes page cache (fixture reads).
+  def container_memory(container)
+    pid = run("docker", "inspect", "-f", "{{.State.Pid}}", container).strip
+    path = File.read("/proc/#{pid}/cgroup")[/^0::(\S+)$/, 1] or raise "cgroup v2 is required for memory measurement"
+    cgroup_memory(File.join("/sys/fs/cgroup", path))
+  end
+
+  # The counters are read separately, so cache reclaim in between can make one sample inconsistent.
+  def cgroup_memory(dir, attempts: 3)
+    attempts.times do
+      stat = File.readlines(File.join(dir, "memory.stat")).to_h { |line| name, value = line.split; [name, Integer(value)] }
+      working_set = Integer(File.read(File.join(dir, "memory.current"))) - stat.fetch("inactive_file")
+      # A consistent sample's working set always contains all anonymous memory.
+      next if working_set < stat.fetch("anon")
+      return { "working_set_bytes" => working_set, "anon_bytes" => stat.fetch("anon"),
+        "peak_bytes" => Integer(File.read(File.join(dir, "memory.peak"))) }
+    end
+    raise "inconsistent cgroup memory counters in #{dir}"
+  end
+
   def clock
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end

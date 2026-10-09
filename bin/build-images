@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+# Times uncached production image builds. Each build gets a fresh, empty BuildKit builder,
+# so neither layer cache, cache mounts nor previously pulled base images are reused.
+# The measured time includes base image pulls and loading the result into the local image store.
+# Shares the benchmark lock: builds must not overlap timed runs.
+lock = File.open(File.join(ENV.fetch("TMPDIR", "/tmp"), "once-campfire-verification-benchmark.lock"), "a")
+abort "Another Campfire benchmark is running; wait for it to finish" unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+require_relative "../bench/comparison_support"
+require "time"
+include BenchmarkSupport
+
+options = { apps: "rails,django,laravel,express,elixir,go,rust,c", rounds: 1, workspace: File.dirname(ROOT),
+  output: File.join(WORK, "builds", "#{Time.now.utc.strftime('%Y%m%d-%H%M%S')}-#{Process.pid}") }
+OptionParser.new do |parser|
+  parser.on("--apps VALUE", String) { |value| options[:apps] = value }
+  parser.on("--rounds VALUE", Integer) { |value| options[:rounds] = value }
+  parser.on("--workspace VALUE", String) { |value| options[:workspace] = value }
+  parser.on("--output VALUE", String) { |value| options[:output] = value }
+  parser.on("--help") { puts parser; exit }
+end.parse!
+apps = options[:apps].split(",")
+raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.uniq == apps && (apps - %w[rails django laravel express elixir go rust c cpp]).empty?
+raise "rounds must be positive" unless options[:rounds].positive?
+raise "output already exists: #{options[:output]}" if File.exist?(options[:output])
+
+started_at = Time.now.utc.iso8601
+builder = "cf-build-bench-#{Process.pid}"
+builds = Hash.new { |hash, app| hash[app] = [] }
+sources = {}
+begin
+  options[:rounds].times do |iteration|
+    (iteration.even? ? apps : apps.reverse).each do |app|
+      source = source_dir(options[:workspace], app)
+      identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
+        dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
+      raise "#{app}: source changed between rounds" if sources.key?(app) && sources[app] != identity
+      sources[app] = identity
+      run("docker", "buildx", "create", "--name", builder, "--driver", "docker-container")
+      run("docker", "buildx", "inspect", "--bootstrap", builder)
+      started = clock
+      run("docker", "buildx", "build", "--builder", builder, "--no-cache", "--pull", "--load", "--tag", image_name(app), source)
+      seconds = clock - started
+      Open3.capture3("docker", "buildx", "rm", "--force", builder)
+      image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image_name(app)).strip
+      size = Integer(run("docker", "image", "inspect", "-f", "{{.Size}}", image_id))
+      builds[app] << { round: iteration + 1, seconds: seconds.round(1), image: image_id, size_bytes: size }
+      # Completed builds survive a later failure; summary.json still requires every build.
+      write_json(File.join(options[:output], "#{app}-#{iteration + 1}.json"), builds[app].last.merge(source: identity))
+      puts "#{app} round #{iteration + 1}: built in #{seconds.round(1)} s, #{(size / 1_000_000.0).round(1)} MB"
+      STDOUT.flush
+    end
+  end
+  summary = apps.to_h do |app|
+    [app, { median_build_seconds: median(builds[app].map { |build| build[:seconds] }),
+      median_image_size_bytes: median(builds[app].map { |build| build[:size_bytes] }), builds: builds[app] }]
+  end
+  write_json(File.join(options[:output], "summary.json"), metadata: { started_at: started_at,
+    verification_revision: run("git", "-C", ROOT, "rev-parse", "HEAD").strip, rounds: options[:rounds],
+    docker: run("docker", "version", "-f", "{{.Server.Version}}").strip, source_revisions: sources, complete: true }, builds: summary)
+  puts JSON.pretty_generate(summary)
+ensure
+  Open3.capture3("docker", "buildx", "rm", "--force", builder)
+end
