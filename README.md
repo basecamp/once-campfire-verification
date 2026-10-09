@@ -1,6 +1,6 @@
 # once-campfire-verification
 
-Shared verification and benchmarks for [Campfire](https://github.com/basecamp/once-campfire) and its Django, Laravel, Express, Elixir, Go, Rust, C and C++ implementations.
+Shared verification and benchmarks for [Campfire](https://github.com/basecamp/once-campfire) and its Django, Laravel, Express, Elixir, Go, Rust, C and [C++](https://github.com/ronakjain90/once-campfire-cpp) implementations.
 
 Every measured HTTP response must match its route contract: status, headers, complete decoded body, expected messages and content. Every acknowledged message write must match its exact persisted ID, body, room and search-index entry. Any invalid response or failed write audit fails the run. Browser flows check installation, live messages, editing, search, permissions, settings, invitations and session transfer.
 
@@ -19,7 +19,7 @@ cargo build --release --locked --manifest-path loadgen/Cargo.toml
 bin/benchmark --apps rails,elixir,go,rust
 ```
 
-Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE`, `C_IMAGE` and `CPP_IMAGE`. The C++ implementation is not in the default `--apps` list; select it with `--apps rust,cpp`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. A process lock prevents overlapping benchmark runs. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
+Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE`, `C_IMAGE` and `CPP_IMAGE`. The C++ implementation is outside the basecamp organization: `git clone https://github.com/ronakjain90/once-campfire-cpp ../once-campfire-cpp`. It publishes an image for each commit of its `main`: check out the commit, run `docker pull ghcr.io/ronakjain90/once-campfire-cpp:sha-<commit>` and set `CPP_IMAGE` to it. Its `org.opencontainers.image.revision` label gives the commit, and `gh attestation verify oci://ghcr.io/ronakjain90/once-campfire-cpp:sha-<commit>-amd64 --repo ronakjain90/once-campfire-cpp` checks its build provenance. To build it from source: `docker build -t once-campfire-cpp:app -f ../once-campfire-cpp/docker/Dockerfile ../once-campfire-cpp`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. A process lock prevents overlapping benchmark runs. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
 
 An optional cache-churn profile runs the same validated reads alongside one paced writer:
 
