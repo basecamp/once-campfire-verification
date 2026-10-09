@@ -67,7 +67,8 @@ module BenchmarkSupport
     attempts.times do
       stat = File.readlines(File.join(dir, "memory.stat")).to_h { |line| name, value = line.split; [name, Integer(value)] }
       working_set = Integer(File.read(File.join(dir, "memory.current"))) - stat.fetch("inactive_file")
-      next if working_set.negative?
+      # A consistent sample's working set always contains all anonymous memory.
+      next if working_set < stat.fetch("anon")
       return { "working_set_bytes" => working_set, "anon_bytes" => stat.fetch("anon"),
         "peak_bytes" => Integer(File.read(File.join(dir, "memory.peak"))) }
     end

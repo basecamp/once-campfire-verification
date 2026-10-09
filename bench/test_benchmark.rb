@@ -48,8 +48,12 @@ class BenchmarkExclusionTest < Minitest::Test
     Dir.mktmpdir do |directory|
       File.write(File.join(directory, "memory.current"), "100\n")
       File.write(File.join(directory, "memory.peak"), "1500\n")
+      memory = Object.new.extend(BenchmarkSupport)
       File.write(File.join(directory, "memory.stat"), "anon 600\ninactive_file 300\n")
-      error = assert_raises(RuntimeError) { Object.new.extend(BenchmarkSupport).cgroup_memory(directory) }
+      error = assert_raises(RuntimeError) { memory.cgroup_memory(directory) }
+      assert_includes error.message, "inconsistent cgroup memory counters"
+      File.write(File.join(directory, "memory.current"), "800\n")
+      error = assert_raises(RuntimeError) { memory.cgroup_memory(directory) }
       assert_includes error.message, "inconsistent cgroup memory counters"
     end
   end

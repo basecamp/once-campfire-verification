@@ -44,6 +44,8 @@ begin
       image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image_name(app)).strip
       size = Integer(run("docker", "image", "inspect", "-f", "{{.Size}}", image_id))
       builds[app] << { round: iteration + 1, seconds: seconds.round(1), image: image_id, size_bytes: size }
+      # Completed builds survive a later failure; summary.json still requires every build.
+      write_json(File.join(options[:output], "#{app}-#{iteration + 1}.json"), builds[app].last.merge(source: identity))
       puts "#{app} round #{iteration + 1}: built in #{seconds.round(1)} s, #{(size / 1_000_000.0).round(1)} MB"
       STDOUT.flush
     end
