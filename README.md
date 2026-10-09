@@ -33,6 +33,23 @@ POST benchmark. Reader and writer measurements stay separate in `mixed-summary.j
 they do not enter the headline table. This tests cache invalidation under writes, not
 sustained chat capacity. See the [source architecture inventory](docs/architecture.md).
 
+Reliability profiles run on the same images, seed, CPU allocation and response contracts, but
+record failures instead of aborting on them:
+
+```sh
+bin/reliability --apps rails,elixir,go,rust --profiles overload,cable
+```
+
+- `overload` runs the validated read routes at `--overload-concurrencies` (default 64 and 256)
+  and reports valid requests/sec, errors, invalid responses and latency percentiles.
+- `cable` subscribes `--cable-clients` (default 1,000) Action Cable clients to the busy room's
+  page streams and reports how many subscribed, how many the server disconnected and how many
+  posted messages reached all of them. It runs at the default posting load and again on a fresh
+  container with `--cable-heavy-posters` closed-loop posters (default 64; 0 skips it), reported as
+  `cable_heavy`. Clients do not reconnect, so a disconnected client misses every later message.
+
+Results go to `reliability-summary.json` with every round's raw values.
+
 Against a **fresh, disposable** running app:
 
 ```sh
