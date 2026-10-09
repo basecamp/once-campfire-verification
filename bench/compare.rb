@@ -10,7 +10,7 @@ include BenchmarkSupport
 repo = File.expand_path("..", __dir__)
 workspace = File.dirname(repo)
 work = File.join(repo, "tmp/bench")
-options = { apps: "rails,django,laravel,express,elixir,go,rust,c", rounds: 3, duration: 8, concurrencies: "16", port: 25130,
+options = { apps: "rails,django,laravel,express,elixir,go,rust,c,cpp", rounds: 3, duration: 8, concurrencies: "16", port: 25130,
   workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false, mixed_write_rate: 0,
   loadgen: ENV.fetch("LOADGEN", File.join(repo, "loadgen/target/release/loadgen")),
   env_file: ENV.fetch("BENCH_ENV_FILE", File.join(repo, "fixtures/default/reference.env")),
@@ -125,7 +125,7 @@ begin
       when "express" then {http_workers: config.fetch("WEB_WORKERS", "auto (cpuset)"), cable: "native ws with cluster IPC", jobs: "leased auxiliary SQLite"}
       when "laravel" then {http: "FrankenPHP/Octane", jobs: "leased auxiliary SQLite", cable: "native ReactPHP"}
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
-      when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", "32"), cable: "native", jobs: "in-process"}
+      when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", config.fetch("CAMPFIRE_RESPONSE_CACHE_MB", "32")), cable: "native", jobs: "in-process"}
       when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
       end
       unless %w[c cpp].include?(kind)
