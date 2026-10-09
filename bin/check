@@ -7,6 +7,7 @@ Dir.chdir(root) do
     %w[cargo test --locked --manifest-path loadgen/Cargo.toml],
     %w[ruby bench/test_contracts.rb],
     %w[ruby bench/test_benchmark.rb],
+    %w[ruby bench/test_reliability.rb],
     %w[ruby bench/test_check_sample.rb],
     %w[ruby bench/test_validate_acks.rb],
     %w[ruby bench/test_template_code.rb],

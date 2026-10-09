@@ -499,6 +499,8 @@ struct Delivery {
     unread_frames: AtomicU64,
     /// PresenceChannel#refresh commands sent (`--refresh-secs`).
     refreshes: AtomicU64,
+    /// Established clients whose session the server ended before the run finished.
+    disconnected: AtomicU64,
 }
 
 fn markers(text: &str) -> Vec<u64> {
@@ -515,6 +517,17 @@ fn markers(text: &str) -> Vec<u64> {
         }
     }
     out
+}
+
+/// Counts an established client as disconnected when it ends before the run stops, however it ends.
+struct DisconnectGuard(Arc<AtomicBool>, Arc<Delivery>);
+
+impl Drop for DisconnectGuard {
+    fn drop(&mut self) {
+        if !self.0.load(Ordering::Relaxed) {
+            self.1.disconnected.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -558,6 +571,7 @@ async fn cable_client(
         eprintln!("connected");
     }
     connected.fetch_add(1, Ordering::Relaxed);
+    let _disconnect = DisconnectGuard(stop.clone(), delivery.clone());
     let (mut tx, mut rx) = ws.split();
     for ident in &subs {
         tx.send(WsMessage::text(json!({"command": "subscribe", "identifier": ident}).to_string())).await?;
@@ -588,10 +602,10 @@ async fn cable_client(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let text = match msg? {
-            WsMessage::Text(t) => t,
-            WsMessage::Close(_) => break,
-            _ => continue,
+        let text = match msg {
+            Ok(WsMessage::Text(t)) => t,
+            Ok(WsMessage::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
         };
         on_text(&text, subs.len(), &mut confirms, &mut seen, &confirmed, &delivery);
         if refresh_timer.is_none()
@@ -765,6 +779,7 @@ async fn deflate_cable_client(
         compressed |= line.to_ascii_lowercase().starts_with("sec-websocket-extensions:") && line.contains("permessage-deflate");
     }
     connected.fetch_add(1, Ordering::Relaxed);
+    let _disconnect = DisconnectGuard(stop.clone(), delivery.clone());
     for ident in &subs {
         let payload = json!({"command": "subscribe", "identifier": ident}).to_string();
         write.write_all(&masked_text_frame(payload.as_bytes())).await?;
@@ -964,6 +979,7 @@ async fn cable(a: &Args) -> Res<Value> {
         sent: Mutex::new(HashMap::new()),
         got: Mutex::new(HashMap::new()),
         unread_frames: AtomicU64::new(0),
+        disconnected: AtomicU64::new(0),
         refreshes: AtomicU64::new(0),
         per_client: Mutex::new(hist()),
         receipts: AtomicU64::new(0),
@@ -1145,6 +1161,7 @@ async fn cable(a: &Args) -> Res<Value> {
         "clients": clients,
         "ready": ready,
         "failed": failed.load(Ordering::Relaxed),
+        "disconnected": delivery.disconnected.load(Ordering::Relaxed),
         "connect_secs": (connect_secs * 100.0).round() / 100.0,
         "subscriptions_per_client": profile["subscriptions_per_client"],
         "subscriptions_per_client_range": profile["subscriptions_per_client_range"],
@@ -1628,6 +1645,7 @@ mod cable_client_tests {
             receipts: AtomicU64::new(0),
             wire_bytes: AtomicU64::new(0),
             unread_frames: AtomicU64::new(0),
+            disconnected: AtomicU64::new(0),
             refreshes: AtomicU64::new(0),
         });
         let (confirmed, connected) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));

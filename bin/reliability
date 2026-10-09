@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+# Shares bin/benchmark's lock: reliability runs and benchmarks never overlap.
+lock = File.open(File.join(ENV.fetch("TMPDIR", "/tmp"), "once-campfire-verification-benchmark.lock"), "a")
+abort "Another Campfire benchmark is running; wait for it to finish" unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+require_relative "../bench/reliability"
