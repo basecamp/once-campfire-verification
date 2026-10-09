@@ -13,7 +13,7 @@ Measured with 16 concurrent clients on an AMD Ryzen AI MAX+ 395 with 32 GB RAM, 
 | Sidebar | 4,333 | 1,873 | 4,493 | 94,329 | 5,949 | 59,144 | 120,294 | 152,002 |
 | Search | 4,282 | 1,862 | 4,172 | 84,665 | 5,848 | 60,509 | 121,378 | 149,487 |
 | Post a message | 330 | 262 | 794 | 2,155 | 1,278 | 9,021 | 8,037 | 7,530 |
-| Backend KLOC | 4.4 | 5.0 | 3.9 | 6.5 | 10.3 | 22.9 | 29.8 | 94.8 |
+| Backend KLOC | 5.5 | 5.3 | 4.1 | 6.8 | 11.6 | 23.2 | 30.7 | 94.8 |
 
 Rails, Express and Laravel were remeasured in separate sessions on October 8, 2026 after their selected changes. The final Rails session runs three solo rounds; the separate Express/Laravel sessions alternate those two implementations for three rounds. Each uses two seconds of warmup and eight seconds per sample. Django was subsequently remeasured in a separate three-round session with four Uvicorn workers and Redis on the same four server CPUs. Its normal profile includes the five table workloads plus avatar, static CSS and health responses. The four untouched implementations (Elixir, Go, Rust and C) retain exactly their independently verified figures from the [previous published comparison](https://github.com/basecamp/once-campfire-verification/blob/70e612c1770be352e94d8ccb74184dce74ea6d33/docs/performance-review.md); they were not rerun for this update. All sessions use the same machine, CPU allocation, fixture, 16-client contracts and gzip. This current configuration table combines those sessions and does not imply a fresh simultaneous eight-build comparison.
 
@@ -36,22 +36,28 @@ Rails uses four Puma workers with one request thread each. Its native Resque poo
 
 ## Application source size
 
-KLOC means 1,000 nonblank, noncomment lines of backend application code, rounded to one decimal. Counts use [cloc 2.10](https://github.com/AlDanial/cloc/tree/v2.10) with `--by-file --skip-uniqueness`: Ruby for Rails, Python for Django, PHP for Laravel, server-side JavaScript for Express, Elixir for Elixir, Go for Go, Rust for Rust, and C/headers for C. Frontend source, template files, static data, SQL files, tests, benchmark/parity tooling, documentation, dependencies, vendored libraries, generated files and build/deployment/development scripts are excluded. Rendering logic and helpers written in the backend language are included; separate ERB, Jbuilder, Blade, Eta, EEx, HTML, JSON/SVG templates and browser scripts are excluded.
+KLOC means 1,000 nonblank, noncomment lines of backend application code **including executable code in templates**, rounded to one decimal. Backend files use [cloc 2.10](https://github.com/AlDanial/cloc/tree/v2.10) with `--by-file --skip-uniqueness`. Template source passes through the shared [template-code extractor](../bench/template_code.rb), preserving its original line breaks, then cloc in the backend language. No generated or compiled template code is counted.
 
-Rust inline `#[cfg(test)]` code is parsed and removed using `syn 2.0.119`; external test modules, test data and `test-support` fixture loaders are excluded too. Go's `_test.go` files and the other implementations' test trees are excluded. C's first-party libvips adapter is included as C code; Elixir's C adapters are outside this language-only count. Framework/library internals are excluded in every implementation. These figures describe maintained backend source, not all code executing a request or a measure of feature coverage.
+A template line counts once when it contains a server-side expression, helper call, assignment, conditional, loop or directive. A line mixing HTML and code counts once; several expressions on one line still count once. Multiline code contributes its nonblank, noncomment code lines. Plain HTML/text, CSS, browser JavaScript, template comments and literal/verbatim blocks do not contribute. For example, `<p>{{ $name }}</p>` counts as one line and `<p>Hello</p>` as zero. This remains a physical source-line count: formatting and putting multiple expressions on one line affect the figures.
 
-| Implementation | Counted source revision | Files | Code lines | Backend KLOC |
-|---|---|---:|---:|---:|
-| Rails | [`0aa339d`](https://github.com/basecamp/once-campfire/tree/0aa339d81e0501841e3f23f0dd6e9b2e06e6b60d) | 194 | 4,443 | 4.4 |
-| Django | [`89a0007`](https://github.com/basecamp/once-campfire-django/tree/89a00079e9199ba4e0318e69c668d2f0d70b144e) | 26 | 5,009 | 5.0 |
-| Laravel | [`6d4d929`](https://github.com/basecamp/once-campfire-laravel/tree/6d4d929b07364ac9c23f7da66ec93dbec2f54b2c) | 70 | 3,868 | 3.9 |
-| Express | [`3f14e40`](https://github.com/basecamp/once-campfire-express/tree/3f14e40148ae96d015816178816347b1a28335ea) | 21 | 6,493 | 6.5 |
-| Elixir | [`20073fe`](https://github.com/basecamp/once-campfire-elixir/tree/20073fe759c1a6264cdfa4ab5c467a0b0553cce9) | 90 | 10,303 | 10.3 |
-| Go | [`a6c1359`](https://github.com/basecamp/once-campfire-go/tree/a6c13597c68ab76e8215ccc56aa2c29c6efe2142) | 118 | 22,897 | 22.9 |
-| Rust | [`6838ead`](https://github.com/basecamp/once-campfire-rust/tree/6838ead05391bd287a3b0bdd14904d0a5b44ad8a) | 223 | 29,784 | 29.8 |
-| C | [`ddaafaf`](https://github.com/basecamp/once-campfire-c/tree/ddaafaff4ad1d263f4808dbd6d4718bea6d194aa) | 223 | 94,816 | 94.8 |
+The extractor handles Rails ERB (with Jbuilder counted as Ruby), Django's Jinja expressions/directives, Laravel Blade echoes/directives and PHP blocks, Express Eta, Elixir EEx, Go templates and Rust Askama, including dynamic JSON/SVG templates. C's rendering logic is already written in C and contributes to its backend count; it has no separate executable template files. The extractor's [regression tests](../bench/test_template_code.rb) cover plain markup, mixed and multiline code, quoted delimiters, nested expressions, comments, escaped/literal regions and malformed input, and run through `bin/check`.
 
-Source selection is restricted to the backend language in these trees: Rails `app/` excluding views, `lib/`, runtime Ruby `config/`, `config.ru` and Ruby migrations; Django `campfire/` and `manage.py`; Laravel `app/`, `bootstrap/`, `config/`, `routes/`, PHP migrations, `public/index.php` and `bin/cable`; Express `src/`; Elixir handwritten `lib/` and runtime configuration; Go `cmd/`, `internal/` and its assets adapter; Rust handwritten crate `src/`; C handwritten `src/` plus its media adapter. The counted revisions match the current published application code; later commits changed documentation only.
+| Implementation | Counted source revision | Backend file code lines | Template code lines | Total code lines | Backend KLOC |
+|---|---|---:|---:|---:|---:|
+| Rails | [`0aa339d`](https://github.com/basecamp/once-campfire/tree/0aa339d81e0501841e3f23f0dd6e9b2e06e6b60d) | 4,443 | 1,054 | 5,497 | 5.5 |
+| Django | [`89a0007`](https://github.com/basecamp/once-campfire-django/tree/89a00079e9199ba4e0318e69c668d2f0d70b144e) | 5,009 | 282 | 5,291 | 5.3 |
+| Laravel | [`6d4d929`](https://github.com/basecamp/once-campfire-laravel/tree/6d4d929b07364ac9c23f7da66ec93dbec2f54b2c) | 3,868 | 222 | 4,090 | 4.1 |
+| Express | [`3f14e40`](https://github.com/basecamp/once-campfire-express/tree/3f14e40148ae96d015816178816347b1a28335ea) | 6,493 | 268 | 6,761 | 6.8 |
+| Elixir | [`20073fe`](https://github.com/basecamp/once-campfire-elixir/tree/20073fe759c1a6264cdfa4ab5c467a0b0553cce9) | 10,303 | 1,298 | 11,601 | 11.6 |
+| Go | [`a6c1359`](https://github.com/basecamp/once-campfire-go/tree/a6c13597c68ab76e8215ccc56aa2c29c6efe2142) | 22,897 | 293 | 23,190 | 23.2 |
+| Rust | [`6838ead`](https://github.com/basecamp/once-campfire-rust/tree/6838ead05391bd287a3b0bdd14904d0a5b44ad8a) | 29,784 | 873 | 30,657 | 30.7 |
+| C | [`ddaafaf`](https://github.com/basecamp/once-campfire-c/tree/ddaafaff4ad1d263f4808dbd6d4718bea6d194aa) | 94,816 | 0 | 94,816 | 94.8 |
+
+Backend source selection is unchanged: Ruby for Rails, Python for Django, PHP for Laravel, server-side JavaScript for Express, Elixir for Elixir, Go for Go, Rust for Rust, and C/headers for C. Rendering helpers, runtime code/configuration and native-language migrations are included. Static data/SQL, frontend, tests, benchmark/parity tooling, documentation, dependencies, vendored libraries, generated files and build/deployment/development scripts are excluded. Rust inline `#[cfg(test)]` code is parsed and removed using `syn 2.0.119`; external test modules, test data and `test-support` fixture loaders are excluded. Go's `_test.go` files and the other test trees are excluded. C's first-party libvips adapter is included as C code; Elixir's C adapters are outside its language-only count.
+
+Template inputs are Rails `app/views/**/*.erb` and `*.jbuilder`; Django `campfire/templates/`; Laravel `resources/views/**/*.blade.php`; Express `templates/**/*.eta`; Elixir `priv/templates/**/*.eex`; Go `internal/web/templates/` and its PWA manifest template; Rust `crates/views/templates/`, including the manifest and avatar templates. The counted revisions match the published application code used by the comparison; later publication commits changed documentation only. Framework/library internals are excluded in every implementation, so these figures describe maintained application source rather than all code executing a request or feature coverage.
+
+To inspect an individual template's contribution, run `ruby bench/template_code.rb SYNTAX TEMPLATE > extracted.EXT`, selecting `erb`, `jinja`, `blade`, `eta`, `eex`, `go` or `askama` and the corresponding backend extension (`rb`, `py`, `php`, `js`, `ex`, `go` or `rs`). Then run `cloc --by-file --skip-uniqueness extracted.EXT` and use its code-line count. Jbuilder files are counted directly as Ruby. Extracted files and raw counting results remain outside version control.
 
 ## Reads with a paced message writer
 

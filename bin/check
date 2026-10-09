@@ -9,6 +9,7 @@ Dir.chdir(root) do
     %w[ruby bench/test_benchmark.rb],
     %w[ruby bench/test_check_sample.rb],
     %w[ruby bench/test_validate_acks.rb],
+    %w[ruby bench/test_template_code.rb],
     %w[node --check browser/smoke.mjs],
     %w[node --check test/sidebar-reload.mjs],
     %w[node --check test/editor-preservation.mjs],
