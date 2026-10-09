@@ -21,6 +21,16 @@ bin/benchmark --apps rails,elixir,go,rust
 
 Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE`, `C_IMAGE` and `CPP_IMAGE`. The C++ implementation is not in the default `--apps` list; select it with `--apps rust,cpp`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. A process lock prevents overlapping benchmark runs. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
 
+Each round also samples the app container's cgroup memory: the working set (usage minus reclaimable inactive file cache, like `docker stats`) when idle after startup and again after the load, plus the kernel's peak, which includes page cache. Anonymous memory (heap and stacks) after the load is the most stable comparison; the working set also counts whatever file cache the kernel charged to the container, which varies between rounds. `summary.json` reports medians and each benchmarked image's size under `resources`. This needs cgroup v2 and Linux 5.19+.
+
+To time builds from scratch and record image sizes:
+
+```sh
+bin/build-images --apps rails,elixir,go,rust --rounds 3
+```
+
+Each build runs in a fresh, empty BuildKit builder with `--no-cache --pull`, so neither the layer cache, cache mounts nor previously pulled base images are reused. The time includes downloading base images and dependencies and loading the result into Docker. Builds use each checkout's root `Dockerfile` and tag the result with the same image names as `bin/benchmark`, replacing any existing tag. The command shares the benchmark lock and writes to `tmp/bench/builds/`.
+
 An optional cache-churn profile runs the same validated reads alongside one paced writer:
 
 ```sh

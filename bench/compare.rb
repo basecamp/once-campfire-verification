@@ -75,7 +75,7 @@ metadata = { verification_revision: run("git", "-C", repo, "rev-parse", "HEAD").
   client_cpus: options[:client_cpus], network: "host", gzip: true, duration: options[:duration],
   concurrencies: options[:concurrencies], rounds: options[:rounds], loadgen_sha256: Digest::SHA256.file(options[:loadgen]).hexdigest,
   routes: selected_routes.join(","), profile: mixed ? "mixed-read-write-v1" : "read-and-post-v1",
-  mixed_writer: mixed ? {clients: 1, maximum_writes_per_second: options[:mixed_write_rate], room: write_room, catch_up: false} : nil, images: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
+  mixed_writer: mixed ? {clients: 1, maximum_writes_per_second: options[:mixed_write_rate], room: write_room, catch_up: false} : nil, images: {}, image_sizes: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
 sql = ->(db, query) do
   readonly = query.match?(/\ASELECT/i)
   output = run("sqlite3", "-cmd", ".timeout 10000", *(readonly ? ["-readonly"] : []), "-json", db, query)
@@ -89,12 +89,12 @@ begin
     order = iteration.even? ? apps : apps.reverse
     order.each do |app|
       kind = runtimes.fetch(app)
-      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
-      image = ENV.fetch("#{env_name.(app)}_IMAGE", images.fetch(app, "once-campfire-#{app}:app"))
-      source = File.join(options[:workspace], kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
+      image = image_name(app)
+      source = source_dir(options[:workspace], app)
       image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
       raise "#{app}: image changed between rounds" if metadata[:images].key?(app) && metadata[:images][app] != image_id
       metadata[:images][app] = image_id
+      metadata[:image_sizes][app] = Integer(run("docker", "image", "inspect", "-f", "{{.Size}}", image_id))
       metadata[:image_labels][app] = JSON.parse(run("docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image))
       source_identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
         dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
@@ -150,6 +150,7 @@ begin
       end
       run("docker", "exec", "--user", "root", container, "chmod", "-R", "a+rwX", "/rails/storage/db")
       sleep 3 unless options[:preflight]
+      idle_memory = container_memory(container)
       cookie = lg.call("login", "--base", base, "--email", labels.fetch("emails.david"), "--password", labels.fetch("passwords.all")).fetch("cookie")
       scrape = lg.call("scrape", "--base", base, "--cookie", cookie, "--room", room.to_s)
       # Browser metadata protects current apps; tokens remain optional for historical references.
@@ -207,6 +208,7 @@ begin
           end
         end
       end
+      row[:memory] = { idle: idle_memory, loaded: container_memory(container) }
       actual_messages = sql.call(db, "SELECT COUNT(*) AS n FROM messages WHERE room_id=#{write_room}").first.fetch("n")
       raise "acknowledged HTTP write count mismatch" unless actual_messages - initial_messages == acknowledged_writes
       raise "FTS entry missing" unless sql.call(db, "SELECT COUNT(*) AS n FROM messages WHERE id NOT IN (SELECT rowid FROM message_search_index)").first.fetch("n").zero?
@@ -234,10 +236,19 @@ begin
     end
     [app, values]
   end
+  resources = apps.to_h do |app|
+    memory = results.select { |row| row[:app] == app }.map { |row| row[:memory] }
+    [app, { image_size_bytes: metadata[:image_sizes].fetch(app),
+      median_idle_working_set_bytes: median(memory.map { |sample| sample[:idle].fetch("working_set_bytes") }),
+      median_loaded_working_set_bytes: median(memory.map { |sample| sample[:loaded].fetch("working_set_bytes") }),
+      median_loaded_anon_bytes: median(memory.map { |sample| sample[:loaded].fetch("anon_bytes") }),
+      median_peak_bytes: median(memory.map { |sample| sample[:loaded].fetch("peak_bytes") }) }]
+  end
   metadata[:complete] = true
   write_json(File.join(options[:output], mixed ? "mixed-summary.json" : "summary.json"), metadata: metadata,
-    (mixed ? :mixed_results : :results) => summary)
+    (mixed ? :mixed_results : :results) => summary, resources: resources)
   puts JSON.pretty_generate(summary)
+  puts JSON.pretty_generate(resources)
 ensure
   remove_container(container)
 end
