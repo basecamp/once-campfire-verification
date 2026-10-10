@@ -10,6 +10,8 @@
 //!                  [--sources 127.0.0.2,127.0.0.3 --hold-secs 60 --deflate 1]
 //!                  [--latency-msgs 30 --interval-ms 200 --tput-secs 15 --posters 4]
 //!                  [--sessions FILE --refresh-secs 50]
+//!   loadgen reconnect --base URL --room ID --sessions FILE --clients N [--policy actioncable|herd]
+//!                                                               -> the blackout of a server restart (reconnect.rs)
 //!   loadgen upload --base URL --cookie C --room ID --csrf T --file PATH [--reps 5]
 //!   loadgen fetch  --base URL --cookie C --path P --out FILE     -> saves an uncompressed body
 //!   loadgen gzip   --file F [--iters 200]                         -> CPU per compression, by backend/level
@@ -32,6 +34,7 @@
 //! desktop Chrome: `--user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 //! (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'` (one line).
 
+mod reconnect;
 mod validation;
 
 use std::collections::{HashMap, HashSet};
@@ -1298,10 +1301,11 @@ async fn main() {
         "scrape" => scrape(&a).await,
         "http" => http_load(&a).await,
         "cable" => cable(&a).await,
+        "reconnect" => reconnect::run(&a).await,
         "upload" => upload(&a).await,
         "fetch" => fetch(&a).await,
         "gzip" => gzip_cost(&a),
-        _ => Err("usage: loadgen login|scrape|http|cable|upload|fetch|gzip --base URL ...".into()),
+        _ => Err("usage: loadgen login|scrape|http|cable|reconnect|upload|fetch|gzip --base URL ...".into()),
     };
     match out {
         Ok(v) => println!("{v}"),
