@@ -6,8 +6,9 @@
 //!                     [--max-secs 180 --settle-secs 3 --probe-ms 200 --trace FILE]
 //!
 //! N people (`--sessions`, as for `cable`) hold a room page's cable connection. Once they are all subscribed the
-//! command prints `PHASE ready <unix ms>` on stderr: the caller restarts the server then. Every socket drops, and each
-//! client gets back in the way `--policy` says:
+//! command prints `PHASE ready <unix ms>` on stderr: the caller restarts the server then. If one of them doesn't
+//! subscribe, or loses the connection before that, the command fails instead. Every socket drops, and each client gets
+//! back in the way `--policy` says:
 //!
 //! - `actioncable` (the default) replays the browser: `ConnectionMonitor` of `@rails/actioncable`. It doesn't retry
 //!   when the socket closes but at the next turn of its poll timer (every 6-12 s at random), never sooner than 6 s
@@ -26,7 +27,7 @@
 //! doesn't complete in `--connect-timeout-ms` counts as a failed attempt; the upgrade is waited for without a limit,
 //! as a browser does. `--trace FILE` writes one line per client, milliseconds from the first close.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,8 +65,9 @@ struct Ctx {
     retry: Duration,
     early: (f64, f64, f64),
     connect_timeout: Duration,
-    /// Set at `PHASE ready`: closes before it are the harness failing, not the restart.
-    armed: AtomicBool,
+    /// The sockets that closed before `PHASE ready`, which is the harness failing and not the restart; `None` from
+    /// then on.
+    closed_before_ready: Mutex<Option<usize>>,
     ready: AtomicUsize,
     failed: AtomicUsize,
     back: AtomicUsize,
@@ -76,10 +78,10 @@ struct Ctx {
 /// One client's timeline.
 #[derive(Clone, Default)]
 struct Record {
-    ready: bool,
-    early_close: bool,
     close: Option<Instant>,
     first_attempt: Option<Instant>,
+    /// The first socket to open after the close, which may not be the one that got in.
+    first_opened: Option<Instant>,
     tries: u32,
     failed_tries: u32,
     reopens: u32,
@@ -271,7 +273,6 @@ async fn person(
         }
         Some(ws)
     };
-    rec.ready = true;
     ctx.ready.fetch_add(1, Ordering::Relaxed);
 
     let mut monitor = Monitor::new(Instant::now());
@@ -339,6 +340,7 @@ async fn person(
                         confirms = 0;
                         rec.attempt = Some(pending_since);
                         rec.opened = Some(now);
+                        rec.first_opened.get_or_insert(now);
                     }
                     _ => {
                         rec.failed_tries += 1;
@@ -402,18 +404,25 @@ async fn person(
             }
         }
         if closed {
-            if !ctx.armed.load(Ordering::Relaxed) {
-                rec.early_close = true;
+            // Before `PHASE ready` this is no blackout to measure: the client stops here, and `run` gives up.
+            if let Some(count) = ctx.closed_before_ready.lock().unwrap().as_mut() {
+                *count += 1;
+                return rec;
             }
             rec.close.get_or_insert(now);
-            // A drop while getting back in voids what this socket had confirmed.
+            // A drop while getting back in voids what this socket had confirmed, and the refresh it had asked for,
+            // answered or not: the page asks again at every connect.
             if rec.back.is_none() {
                 rec.confirmed = None;
+                rec.refreshed = None;
+                if let Some(asked) = refreshing.take() {
+                    asked.abort();
+                }
             }
             monitor.closed(now);
             if reopen_at.is_none() {
                 match ctx.policy {
-                    Policy::Herd => reopen_at = Some(now + ctx.retry.mul_f64(rng.unit())),
+                    Policy::Herd => start_attempt = true,
                     Policy::Early => reopen_at = Some(now + early_wait(early_failures, &mut rng)),
                     Policy::ActionCable => {}
                 }
@@ -511,7 +520,7 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
         retry: Duration::from_millis(a.num("retry-ms", 250)),
         early: (a.num("early-min-ms", 1000.0) / 1000.0, a.num("early-max-ms", 2000.0) / 1000.0, a.num("early-backoff", 1.0)),
         connect_timeout: Duration::from_millis(a.num("connect-timeout-ms", 2000)),
-        armed: AtomicBool::new(false),
+        closed_before_ready: Mutex::new(Some(0)),
         ready: AtomicUsize::new(0),
         failed: AtomicUsize::new(0),
         back: AtomicUsize::new(0),
@@ -531,17 +540,25 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
     while ctx.ready.load(Ordering::Relaxed) + ctx.failed.load(Ordering::Relaxed) < clients && Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The caller replaces the server at `PHASE ready`: with fewer than N people there, it would not be the run asked for.
     let ready = ctx.ready.load(Ordering::Relaxed);
+    if ready < clients {
+        return Err(format!("only {ready} of {clients} clients subscribed ({} failed)", ctx.failed.load(Ordering::Relaxed)).into());
+    }
     let changes = Arc::new(Mutex::new(Vec::new()));
     let prober = tokio::spawn(probe(addr.clone(), Duration::from_millis(a.num("probe-ms", 200)), changes.clone(), stop_rx.clone()));
     tokio::time::sleep(Duration::from_secs(1)).await;
-    ctx.armed.store(true, Ordering::Relaxed);
+    // From here on a close is the restart's.
+    let closed_before_ready = ctx.closed_before_ready.lock().unwrap().take().unwrap_or(0);
+    if closed_before_ready > 0 {
+        return Err(format!("sockets closed before PHASE ready: {closed_before_ready}").into());
+    }
     let armed_at = Instant::now();
     let armed_unix_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as f64;
     phase("ready");
 
     let until = armed_at + Duration::from_secs(max_secs);
-    while ctx.back.load(Ordering::Relaxed) < ready && Instant::now() < until {
+    while ctx.back.load(Ordering::Relaxed) < clients && Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     phase("back");
@@ -553,7 +570,7 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
     }
     let _ = prober.await;
 
-    let t0 = records.iter().filter(|r| !r.early_close).filter_map(|r| r.close).min();
+    let t0 = records.iter().filter_map(|r| r.close).min();
     let Some(t0) = t0 else {
         return Err("no socket closed after PHASE ready: was the server replaced?".into());
     };
@@ -603,19 +620,16 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
         "clients": clients,
         "policy": a.opt("policy").unwrap_or_else(|| "actioncable".to_string()),
         "refresh": ctx.refresh_path.is_some(),
-        "ready": ready,
-        "failed_before_ready": ctx.failed.load(Ordering::Relaxed),
-        "closed_before_ready": records.iter().filter(|r| r.early_close).count(),
         "closed": closes.len(),
         "back": records.iter().filter(|r| r.back.is_some()).count(),
-        // Everyone connected before the restart, lost the connection and is back, refresh answered with a 200 included.
-        "everyone_back": records.iter().all(|r| r.ready && r.close.is_some() && r.back.is_some()),
+        // Everyone lost the connection and is back, refresh answered with a 200 included.
+        "everyone_back": records.iter().all(|r| r.close.is_some() && r.back.is_some()),
         "close_spread_secs": summary(closes),
         "first_close_unix_ms": (armed_unix_ms - secs(armed_at) * 1000.0).round(),
         "server": {
             "down_at_secs": down_at.map(secs),
             "up_at_secs": up_at.map(secs),
-            "first_socket_open_secs": records.iter().filter_map(|r| r.opened).min().map(secs),
+            "first_socket_open_secs": records.iter().filter_map(|r| r.first_opened).min().map(secs),
         },
         // Seconds from each person's own close.
         "blackout_secs": summary(pick(&|r| span(r.close, r.back))),
@@ -715,37 +729,52 @@ mod tests {
         assert_eq!(per_second([0.2, 0.9, 2.5, -1.0].into_iter()), vec![2, 0, 1]);
     }
 
-    /// A cable server for one person: it confirms their subscriptions and drops them, welcomes them back and
-    /// confirms again, then answers the refresh request with `status`. Returns the cookie each request carried.
+    type Seen = Arc<Mutex<Vec<String>>>;
+
+    /// What the server saw: a cable socket's cookie, a refresh request's cookie line.
+    const SOCKET: &str = "session_token=person-7";
+    const REFRESH: &str = "cookie: session_token=person-7";
+
+    fn subs() -> Vec<String> {
+        vec![r#"{"channel":"PresenceChannel","room_id":1}"#.to_string(), r#"{"channel":"HeartbeatChannel"}"#.to_string()]
+    }
+
+    /// Accepts a cable socket and reads the person's two subscribe commands: the socket and their identifiers. A
+    /// server that is back welcomes them first; the first socket of all subscribes without waiting for it.
     // The handshake callback's error type is tungstenite's, not ours to shrink.
     #[allow(clippy::result_large_err)]
-    async fn serve(listener: tokio::net::TcpListener, status: u16, done: tokio::sync::oneshot::Receiver<()>) -> Vec<String> {
-        let cookies = Arc::new(Mutex::new(Vec::new()));
-        let mut held = None;
-        for round in 0..2 {
-            let (stream, _) = listener.accept().await.unwrap();
-            let seen = cookies.clone();
-            let mut ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, mut resp: Response| {
-                seen.lock().unwrap().push(req.headers()["cookie"].to_str().unwrap().to_string());
-                resp.headers_mut().insert("sec-websocket-protocol", "actioncable-v1-json".parse().unwrap());
-                Ok(resp)
-            })
-            .await
-            .unwrap();
-            if round == 1 {
-                ws.send(WsMessage::text(json!({"type": "welcome"}).to_string())).await.unwrap();
-            }
-            for _ in 0..2 {
-                let Some(Ok(WsMessage::Text(text))) = ws.next().await else { panic!("no subscribe command") };
-                let command: Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(command["command"], "subscribe");
-                let confirm = json!({"identifier": command["identifier"], "type": "confirm_subscription"});
-                ws.send(WsMessage::text(confirm.to_string())).await.unwrap();
-            }
-            if round == 1 {
-                held = Some(ws); // the first socket is dropped here, the second stays open
-            }
+    async fn socket(listener: &tokio::net::TcpListener, welcome: bool, seen: &Seen) -> (Ws, Vec<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let cookies = seen.clone();
+        let mut ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, mut resp: Response| {
+            cookies.lock().unwrap().push(req.headers()["cookie"].to_str().unwrap().to_string());
+            resp.headers_mut().insert("sec-websocket-protocol", "actioncable-v1-json".parse().unwrap());
+            Ok(resp)
+        })
+        .await
+        .unwrap();
+        if welcome {
+            ws.send(WsMessage::text(json!({"type": "welcome"}).to_string())).await.unwrap();
         }
+        let mut identifiers = Vec::new();
+        for _ in 0..2 {
+            let Some(Ok(WsMessage::Text(text))) = ws.next().await else { panic!("no subscribe command") };
+            let command: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(command["command"], "subscribe");
+            identifiers.push(command["identifier"].clone());
+        }
+        (ws, identifiers)
+    }
+
+    async fn confirm(ws: &mut Ws, identifiers: &[Value]) {
+        for identifier in identifiers {
+            let confirm = json!({"identifier": identifier, "type": "confirm_subscription"});
+            ws.send(WsMessage::text(confirm.to_string())).await.unwrap();
+        }
+    }
+
+    /// Accepts the refresh request and reads it; the caller answers it, or doesn't.
+    async fn refresh_request(listener: &tokio::net::TcpListener, seen: &Seen) -> TcpStream {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
         while !request.ends_with(b"\r\n\r\n") {
@@ -753,19 +782,65 @@ mod tests {
         }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("GET /rooms/1/refresh?since=5&reason=connection HTTP/1.1"), "{request}");
-        cookies.lock().unwrap().push(request.lines().find(|l| l.starts_with("cookie:")).unwrap_or_default().to_string());
-        let response = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-        stream.write_all(response.as_bytes()).await.unwrap();
-        done.await.ok();
-        drop(held);
-        cookies.lock().unwrap().clone()
+        seen.lock().unwrap().push(request.lines().find(|l| l.starts_with("cookie:")).unwrap_or_default().to_string());
+        stream
     }
 
-    async fn reconnect_one_person(status: u16) -> (Record, Vec<String>, usize) {
+    async fn answer(mut stream: TcpStream, status: u16) {
+        let response = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    /// A cable server for one person: it confirms their subscriptions and drops them, welcomes them back and
+    /// confirms again, then answers the refresh request with `status`.
+    async fn drops_them_once(listener: tokio::net::TcpListener, status: u16, seen: Seen) {
+        let (mut first, identifiers) = socket(&listener, false, &seen).await;
+        confirm(&mut first, &identifiers).await;
+        drop(first);
+        let (mut second, identifiers) = socket(&listener, true, &seen).await;
+        confirm(&mut second, &identifiers).await;
+        answer(refresh_request(&listener, &seen).await, status).await;
+        std::future::pending::<()>().await; // `second` stays open
+    }
+
+    /// The same server, but the socket that gets back in drops before its last subscription is confirmed, with the
+    /// refresh request it brought answered or still waiting. The next socket gets in, and its own request is answered.
+    async fn drops_them_twice(listener: tokio::net::TcpListener, answered: bool, seen: Seen) {
+        let (mut first, identifiers) = socket(&listener, false, &seen).await;
+        confirm(&mut first, &identifiers).await;
+        drop(first);
+        let (mut second, identifiers) = socket(&listener, true, &seen).await;
+        confirm(&mut second, &identifiers[1..]).await; // HeartbeatChannel alone: the refresh follows it
+        let mut request = refresh_request(&listener, &seen).await;
+        if answered {
+            answer(request, 200).await;
+            tokio::time::sleep(Duration::from_millis(100)).await; // the client has the answer by now
+            drop(second);
+        } else {
+            drop(second);
+            // The client gives the request up with the socket.
+            assert_eq!(request.read(&mut [0; 1]).await.unwrap_or(0), 0);
+        }
+        let (mut third, identifiers) = socket(&listener, true, &seen).await;
+        confirm(&mut third, &identifiers).await;
+        answer(refresh_request(&listener, &seen).await, 200).await;
+        std::future::pending::<()>().await; // `third` stays open
+    }
+
+    /// One person on a server of their own, until they are back, their task has ended or `patience` seconds have
+    /// passed. `before_ready`: `PHASE ready` has not been printed yet.
+    async fn one_person<S>(
+        serve: impl FnOnce(tokio::net::TcpListener, Seen) -> S,
+        before_ready: bool,
+        patience: f64,
+    ) -> (Record, Vec<String>, Arc<Ctx>)
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(serve(listener, status, done_rx));
+        let seen = Seen::default();
+        let server = tokio::spawn(serve(listener, seen.clone()));
         let ctx = Arc::new(Ctx {
             addr,
             refresh_path: Some("/rooms/1/refresh?since=5&reason=connection".to_string()),
@@ -773,50 +848,154 @@ mod tests {
             retry: Duration::from_millis(20),
             early: (1.0, 2.0, 1.0),
             connect_timeout: Duration::from_secs(2),
-            armed: AtomicBool::new(true),
+            closed_before_ready: Mutex::new(before_ready.then_some(0)),
             ready: AtomicUsize::new(0),
             failed: AtomicUsize::new(0),
             back: AtomicUsize::new(0),
             attempts: Mutex::new(Vec::new()),
         });
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let subs = vec![r#"{"channel":"PresenceChannel","room_id":1}"#.to_string(), r#"{"channel":"HeartbeatChannel"}"#.to_string()];
         let gate = Arc::new(tokio::sync::Semaphore::new(1));
-        let person = tokio::spawn(person(ctx.clone(), 0, "session_token=person-7".into(), subs, gate, stop_rx));
+        let person = tokio::spawn(person(ctx.clone(), 0, SOCKET.into(), subs(), gate, stop_rx));
 
-        // Until the client is back, or for long enough that a refused refresh has been answered.
-        let until = Instant::now() + Duration::from_secs(if status == 200 { 10 } else { 1 });
-        while ctx.back.load(Ordering::Relaxed) == 0 && Instant::now() < until {
+        let until = Instant::now() + secs(patience);
+        while ctx.back.load(Ordering::Relaxed) == 0 && !person.is_finished() && Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        stop_tx.send(true).unwrap();
+        stop_tx.send(true).ok(); // nobody is listening when the person's task has ended
         let record = tokio::time::timeout(Duration::from_secs(5), person).await.unwrap().unwrap();
-        done_tx.send(()).ok();
-        let cookies = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
-        (record, cookies, ctx.back.load(Ordering::Relaxed))
+        server.abort();
+        if let Err(error) = server.await
+            && error.is_panic()
+        {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        (record, seen.lock().unwrap().clone(), ctx)
+    }
+
+    /// `run` for `clients` people on the server at `addr`, with no refresh request and no time to spare.
+    async fn run_on(addr: &str, clients: usize) -> Res<Value> {
+        let port = addr.rsplit(':').next().unwrap();
+        let sessions = std::env::temp_dir().join(format!("loadgen-reconnect-{port}.tsv"));
+        std::fs::write(&sessions, format!("{SOCKET}\t{}\n", subs().join("\t"))).unwrap();
+        let raw = [
+            "--base",
+            &format!("http://{addr}"),
+            "--room",
+            "1",
+            "--sessions",
+            sessions.to_str().unwrap(),
+            "--clients",
+            &clients.to_string(),
+            "--refresh",
+            "0",
+            "--max-secs",
+            "1",
+            "--settle-secs",
+            "0",
+        ]
+        .map(str::to_string);
+        let result = run(&Args::parse(&raw)).await;
+        std::fs::remove_file(sessions).ok();
+        result
     }
 
     #[tokio::test]
     async fn a_person_the_server_drops_gets_back_in_and_refreshes_the_room() {
-        let (record, cookies, back) = reconnect_one_person(200).await;
+        let (record, seen, ctx) = one_person(|listener, seen| drops_them_once(listener, 200, seen), false, 10.0).await;
 
-        assert_eq!(back, 1);
-        assert!(record.ready && !record.early_close);
+        assert_eq!(ctx.back.load(Ordering::Relaxed), 1);
         assert_eq!((record.tries, record.failed_tries, record.reopens), (1, 0, 0));
         assert_eq!(record.refresh_status, Some(200));
         let (close, opened, welcome) = (record.close.unwrap(), record.opened.unwrap(), record.welcome.unwrap());
         let (confirmed, back_at) = (record.confirmed.unwrap(), record.back.unwrap());
         assert!(close <= opened && opened <= welcome && welcome <= confirmed && confirmed <= back_at);
-        assert_eq!(cookies, vec!["session_token=person-7", "session_token=person-7", "cookie: session_token=person-7"]);
+        assert_eq!(seen, [SOCKET, SOCKET, REFRESH]);
     }
 
     #[tokio::test]
     async fn a_person_whose_refresh_is_refused_is_not_back() {
-        let (record, _, back) = reconnect_one_person(500).await;
+        // Long enough for the refused refresh to have been answered.
+        let (record, _, ctx) = one_person(|listener, seen| drops_them_once(listener, 500, seen), false, 1.0).await;
 
-        assert_eq!(back, 0);
+        assert_eq!(ctx.back.load(Ordering::Relaxed), 0);
         assert!(record.confirmed.is_some(), "the subscriptions were confirmed");
         assert_eq!(record.refresh_status, Some(500));
         assert!(record.refreshed.is_none() && record.back.is_none());
+    }
+
+    #[tokio::test]
+    async fn herd_tries_again_at_the_close() {
+        let (record, _, _) = one_person(|listener, seen| drops_them_once(listener, 200, seen), false, 10.0).await;
+
+        assert!(record.close.is_some());
+        assert_eq!(record.first_attempt, record.close, "with no wait");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_answered_before_a_drop_is_asked_again() {
+        let (record, seen, ctx) = one_person(|listener, seen| drops_them_twice(listener, true, seen), false, 10.0).await;
+
+        assert_eq!(seen, [SOCKET, SOCKET, REFRESH, SOCKET, REFRESH], "the socket that got in asks for the room itself");
+        assert_eq!(ctx.back.load(Ordering::Relaxed), 1);
+        assert_eq!((record.tries, record.failed_tries, record.refresh_status), (2, 0, Some(200)));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_waiting_at_a_drop_is_asked_again() {
+        let (record, seen, ctx) = one_person(|listener, seen| drops_them_twice(listener, false, seen), false, 10.0).await;
+
+        assert_eq!(seen, [SOCKET, SOCKET, REFRESH, SOCKET, REFRESH], "the socket that got in asks for the room itself");
+        assert_eq!(ctx.back.load(Ordering::Relaxed), 1);
+        assert_eq!((record.tries, record.failed_tries, record.refresh_status), (2, 0, Some(200)));
+    }
+
+    #[tokio::test]
+    async fn a_close_before_ready_is_not_a_blackout() {
+        let (record, seen, ctx) = one_person(|listener, seen| drops_them_once(listener, 200, seen), true, 10.0).await;
+
+        assert_eq!(seen, [SOCKET], "the client stops there");
+        assert_eq!(ctx.back.load(Ordering::Relaxed), 0);
+        assert!(record.close.is_none() && record.back.is_none());
+        assert_eq!(*ctx.closed_before_ready.lock().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_first_socket_to_open_is_not_forgotten() {
+        let (record, _, _) = one_person(|listener, seen| drops_them_twice(listener, true, seen), false, 10.0).await;
+
+        let (first, attempt, opened) = (record.first_opened.unwrap(), record.attempt.unwrap(), record.opened.unwrap());
+        assert!(first < attempt, "the first socket had opened before the attempt that got in began");
+        assert!(attempt <= opened);
+    }
+
+    #[tokio::test]
+    async fn ready_takes_everyone_subscribed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut first, identifiers) = socket(&listener, false, &Seen::default()).await;
+            confirm(&mut first, &identifiers).await;
+            drop(listener.accept().await.unwrap()); // the second person is turned away
+            std::future::pending::<()>().await; // `first` stays open
+        });
+        let error = run_on(&addr, 2).await.unwrap_err().to_string();
+        server.abort();
+
+        assert_eq!(error, "only 1 of 2 clients subscribed (1 failed)");
+    }
+
+    #[tokio::test]
+    async fn a_socket_closing_before_ready_ends_the_run() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // Subscribed, then dropped at once.
+        tokio::spawn(async move {
+            let (mut only, identifiers) = socket(&listener, false, &Seen::default()).await;
+            confirm(&mut only, &identifiers).await;
+        });
+        let error = run_on(&addr, 1).await.unwrap_err().to_string();
+
+        assert_eq!(error, "sockets closed before PHASE ready: 1");
     }
 }
