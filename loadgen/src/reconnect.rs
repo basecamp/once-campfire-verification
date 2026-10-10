@@ -90,7 +90,8 @@ struct Record {
     confirmed: Option<Instant>,
     refreshed: Option<Instant>,
     refresh_ms: f64,
-    refresh_status: u16,
+    /// The refresh request's answer, whatever it was; 0 when there was none.
+    refresh_status: Option<u16>,
     back: Option<Instant>,
 }
 
@@ -121,6 +122,55 @@ fn first_poll(rng: &mut Rng) -> Duration {
         t += poll_interval(0, rng).as_secs_f64();
     }
     Duration::from_secs_f64(t)
+}
+
+/// What `ConnectionMonitor` and `Connection` remember between polls, named as in connection_monitor.js.
+struct Monitor {
+    pinged_at: Instant,
+    reconnect_attempts: u32,
+    disconnected_at: Option<Instant>,
+    /// `Connection#disconnected`: set by a close and cleared by an open, so that a failed attempt is not another disconnect.
+    disconnected: bool,
+}
+
+impl Monitor {
+    fn new(now: Instant) -> Self {
+        Monitor { pinged_at: now, reconnect_attempts: 0, disconnected_at: None, disconnected: false }
+    }
+
+    /// `recordMessage`: every message counts, not only pings.
+    fn record_message(&mut self, now: Instant) {
+        self.pinged_at = now;
+    }
+
+    /// `recordConnect`, on the welcome.
+    fn record_connect(&mut self) {
+        self.reconnect_attempts = 0;
+        self.disconnected_at = None;
+    }
+
+    /// The socket opened.
+    fn opened(&mut self) {
+        self.disconnected = false;
+    }
+
+    /// The close event: `recordDisconnect`, once per socket that had opened.
+    fn closed(&mut self, now: Instant) {
+        if !self.disconnected {
+            self.disconnected = true;
+            self.disconnected_at = Some(now);
+        }
+    }
+
+    /// `reconnectIfStale`: whether this poll reopens the connection. A connection silent for more than six seconds is
+    /// stale and counts an attempt, but one that closed less than six seconds ago is left alone.
+    fn poll(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.pinged_at).as_secs_f64() <= STALE {
+            return false;
+        }
+        self.reconnect_attempts += 1;
+        !self.disconnected_at.is_some_and(|closed| now.duration_since(closed).as_secs_f64() < STALE)
+    }
 }
 
 /// Opens the socket: TCP within the timeout, then the upgrade for as long as it takes.
@@ -224,11 +274,7 @@ async fn person(
     rec.ready = true;
     ctx.ready.fetch_add(1, Ordering::Relaxed);
 
-    // The monitor's state, named as in connection_monitor.js.
-    let mut pinged_at = Instant::now();
-    let mut reconnect_attempts = 0u32;
-    let mut disconnected_at: Option<Instant> = None;
-    let mut disconnected = false;
+    let mut monitor = Monitor::new(Instant::now());
     let mut next_poll = Instant::now() + first_poll(&mut rng);
 
     let mut pending: Option<JoinHandle<Res<Ws>>> = None;
@@ -247,7 +293,7 @@ async fn person(
         enum Event {
             Poll,
             Reopen,
-            Opened(Option<Res<Ws>>),
+            Opened(Box<Option<Res<Ws>>>),
             Frame(Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>),
             Refreshed(Option<(f64, u16)>),
             Stop,
@@ -255,7 +301,7 @@ async fn person(
         let event = tokio::select! {
             _ = tokio::time::sleep_until(next_poll) => Event::Poll,
             _ = at(reopen_at) => Event::Reopen,
-            r = joined(&mut pending) => Event::Opened(r),
+            r = joined(&mut pending) => Event::Opened(Box::new(r)),
             f = next_frame(&mut live) => Event::Frame(f),
             r = joined(&mut refreshing) => Event::Refreshed(r),
             _ = stop.changed() => Event::Stop,
@@ -266,23 +312,18 @@ async fn person(
         match event {
             Event::Stop => break,
             Event::Poll => {
-                // reconnectIfStale
-                if ctx.policy != Policy::Herd && now.duration_since(pinged_at).as_secs_f64() > STALE {
-                    reconnect_attempts += 1;
-                    let recently = disconnected_at.is_some_and(|d| now.duration_since(d).as_secs_f64() < STALE);
-                    if !recently {
-                        // Connection#reopen: an open socket is closed and reopened in 500 ms; a connecting one is left alone.
-                        if live.is_some() {
-                            live = None;
-                            closed = true;
-                            rec.reopens += 1;
-                            reopen_at = Some(now + REOPEN_DELAY);
-                        } else if pending.is_none() {
-                            start_attempt = true;
-                        }
+                if ctx.policy != Policy::Herd && monitor.poll(now) {
+                    // Connection#reopen: an open socket is closed and reopened in 500 ms; a connecting one is left alone.
+                    if live.is_some() {
+                        live = None;
+                        closed = true;
+                        rec.reopens += 1;
+                        reopen_at = Some(now + REOPEN_DELAY);
+                    } else if pending.is_none() {
+                        start_attempt = true;
                     }
                 }
-                next_poll = now + poll_interval(reconnect_attempts, &mut rng);
+                next_poll = now + poll_interval(monitor.reconnect_attempts, &mut rng);
             }
             Event::Reopen => {
                 reopen_at = None;
@@ -290,10 +331,10 @@ async fn person(
             }
             Event::Opened(result) => {
                 pending = None;
-                match result {
+                match *result {
                     Some(Ok(ws)) => {
                         live = Some(ws);
-                        disconnected = false;
+                        monitor.opened();
                         early_failures = 0;
                         confirms = 0;
                         rec.attempt = Some(pending_since);
@@ -314,10 +355,9 @@ async fn person(
             }
             Event::Frame(frame) => match frame {
                 Some(Ok(WsMessage::Text(text))) => {
-                    pinged_at = now; // recordMessage: every message counts, not only pings
+                    monitor.record_message(now);
                     if text.contains(r#""type":"welcome""#) {
-                        reconnect_attempts = 0; // recordConnect
-                        disconnected_at = None;
+                        monitor.record_connect();
                         rec.welcome = Some(now);
                         if let Some(ws) = live.as_mut()
                             && subscribe(ws, &subs).await.is_err()
@@ -353,9 +393,12 @@ async fn person(
             Event::Refreshed(result) => {
                 refreshing = None;
                 let (ms, status) = result.unwrap_or((0.0, 0));
-                rec.refreshed = Some(now);
+                // Only a 200 brings the room up to date: with anything else this client is not back.
+                if status == 200 {
+                    rec.refreshed = Some(now);
+                }
                 rec.refresh_ms = ms;
-                rec.refresh_status = status;
+                rec.refresh_status = Some(status);
             }
         }
         if closed {
@@ -367,10 +410,7 @@ async fn person(
             if rec.back.is_none() {
                 rec.confirmed = None;
             }
-            if !disconnected {
-                disconnected = true; // the close event: recordDisconnect
-                disconnected_at = Some(now);
-            }
+            monitor.closed(now);
             if reopen_at.is_none() {
                 match ctx.policy {
                     Policy::Herd => reopen_at = Some(now + ctx.retry.mul_f64(rng.unit())),
@@ -515,7 +555,7 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
 
     let t0 = records.iter().filter(|r| !r.early_close).filter_map(|r| r.close).min();
     let Some(t0) = t0 else {
-        return Ok(json!({"clients": clients, "ready": ready, "error": "no socket closed after PHASE ready: was the server restarted?"}));
+        return Err("no socket closed after PHASE ready: was the server replaced?".into());
     };
     let secs = |t: Instant| if t >= t0 { t.duration_since(t0).as_secs_f64() } else { -t0.duration_since(t).as_secs_f64() };
     let span = |from: Option<Instant>, to: Option<Instant>| Some(to?.duration_since(from?).as_secs_f64());
@@ -528,13 +568,15 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
     let mut statuses = std::collections::BTreeMap::new();
     for r in records.iter().filter(|r| r.close.is_some()) {
         *tries.entry(r.tries.to_string()).or_insert(0u32) += 1;
-        if r.refreshed.is_some() {
-            *statuses.entry(r.refresh_status.to_string()).or_insert(0u32) += 1;
+        if let Some(status) = r.refresh_status {
+            *statuses.entry(status.to_string()).or_insert(0u32) += 1;
         }
     }
     if let Some(path) = a.opt("trace") {
         let ms = |t: Option<Instant>| t.map(|t| format!("{:.0}", secs(t) * 1000.0)).unwrap_or_default();
-        let mut out = String::from("client\tclose\tfirst_attempt\ttries\tfailed_tries\treopens\tattempt\topened\twelcome\tconfirmed\trefreshed\trefresh_ms\trefresh_status\tback\n");
+        let mut out = String::from(
+            "client\tclose\tfirst_attempt\ttries\tfailed_tries\treopens\tattempt\topened\twelcome\tconfirmed\trefreshed\trefresh_ms\trefresh_status\tback\n",
+        );
         for (n, r) in records.iter().enumerate() {
             out.push_str(&format!(
                 "{n}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\n",
@@ -549,7 +591,7 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
                 ms(r.confirmed),
                 ms(r.refreshed),
                 r.refresh_ms,
-                r.refresh_status,
+                r.refresh_status.map(|status| status.to_string()).unwrap_or_default(),
                 ms(r.back)
             ));
         }
@@ -566,6 +608,8 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
         "closed_before_ready": records.iter().filter(|r| r.early_close).count(),
         "closed": closes.len(),
         "back": records.iter().filter(|r| r.back.is_some()).count(),
+        // Everyone connected before the restart, lost the connection and is back, refresh answered with a 200 included.
+        "everyone_back": records.iter().all(|r| r.ready && r.close.is_some() && r.back.is_some()),
         "close_spread_secs": summary(closes),
         "first_close_unix_ms": (armed_unix_ms - secs(armed_at) * 1000.0).round(),
         "server": {
@@ -591,4 +635,188 @@ pub(crate) async fn run(a: &Args) -> Res<Value> {
         "attempts_per_second": per_second(attempts.iter().map(|t| secs(*t))),
         "back_per_second": per_second(records.iter().filter_map(|r| r.back.map(secs))),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn a_fresh_close_is_left_alone_for_six_seconds() {
+        let t0 = Instant::now();
+        let mut monitor = Monitor::new(t0);
+        monitor.closed(t0 + secs(1.0));
+
+        assert!(!monitor.poll(t0 + secs(5.0)), "not stale yet: a message arrived five seconds ago");
+        assert_eq!(monitor.reconnect_attempts, 0);
+        assert!(!monitor.poll(t0 + secs(6.5)), "stale, but the close is 5.5 seconds old");
+        assert_eq!(monitor.reconnect_attempts, 1);
+        assert!(monitor.poll(t0 + secs(7.1)), "stale, and the close is 6.1 seconds old");
+        assert_eq!(monitor.reconnect_attempts, 2);
+    }
+
+    #[test]
+    fn a_failed_attempt_is_not_another_disconnect() {
+        let t0 = Instant::now();
+        let mut monitor = Monitor::new(t0);
+        monitor.closed(t0 + secs(1.0));
+        monitor.closed(t0 + secs(8.0)); // the attempt at 8 s never opened
+        assert!(monitor.poll(t0 + secs(9.0)), "the close that counts is the first one");
+
+        monitor.opened();
+        monitor.closed(t0 + secs(10.0)); // this one had opened
+        assert!(!monitor.poll(t0 + secs(15.0)));
+        assert!(monitor.poll(t0 + secs(16.5)));
+    }
+
+    #[test]
+    fn a_welcome_starts_the_count_again() {
+        let t0 = Instant::now();
+        let mut monitor = Monitor::new(t0);
+        monitor.closed(t0);
+        assert!(monitor.poll(t0 + secs(7.0)));
+        monitor.record_message(t0 + secs(7.1));
+        monitor.record_connect();
+
+        assert_eq!(monitor.reconnect_attempts, 0);
+        assert!(!monitor.poll(t0 + secs(12.0)));
+    }
+
+    #[test]
+    fn polls_back_off_as_the_monitor_does() {
+        let mut rng = Rng(7);
+        let cap = STALE * (1.0 + BACKOFF_RATE).powi(10);
+        for _ in 0..1000 {
+            let first = poll_interval(0, &mut rng).as_secs_f64();
+            assert!((6.0..12.0).contains(&first), "{first}");
+            let second = poll_interval(1, &mut rng).as_secs_f64();
+            assert!((6.9..7.935).contains(&second), "{second}");
+            let capped = poll_interval(40, &mut rng).as_secs_f64();
+            assert!((cap..cap * 1.15).contains(&capped), "{capped}");
+            let waiting = first_poll(&mut rng).as_secs_f64();
+            assert!(waiting > 0.0 && waiting < 12.0, "{waiting}");
+        }
+    }
+
+    #[test]
+    fn summaries_and_seconds() {
+        assert_eq!(summary(Vec::new()), json!(null));
+        let s = summary((1..=100).map(f64::from).collect());
+        assert_eq!(
+            (s["n"].as_u64(), s["min"].as_f64(), s["p50"].as_f64(), s["max"].as_f64()),
+            (Some(100), Some(1.0), Some(51.0), Some(100.0))
+        );
+        assert_eq!(per_second([0.2, 0.9, 2.5, -1.0].into_iter()), vec![2, 0, 1]);
+    }
+
+    /// A cable server for one person: it confirms their subscriptions and drops them, welcomes them back and
+    /// confirms again, then answers the refresh request with `status`. Returns the cookie each request carried.
+    // The handshake callback's error type is tungstenite's, not ours to shrink.
+    #[allow(clippy::result_large_err)]
+    async fn serve(listener: tokio::net::TcpListener, status: u16, done: tokio::sync::oneshot::Receiver<()>) -> Vec<String> {
+        let cookies = Arc::new(Mutex::new(Vec::new()));
+        let mut held = None;
+        for round in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let seen = cookies.clone();
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, mut resp: Response| {
+                seen.lock().unwrap().push(req.headers()["cookie"].to_str().unwrap().to_string());
+                resp.headers_mut().insert("sec-websocket-protocol", "actioncable-v1-json".parse().unwrap());
+                Ok(resp)
+            })
+            .await
+            .unwrap();
+            if round == 1 {
+                ws.send(WsMessage::text(json!({"type": "welcome"}).to_string())).await.unwrap();
+            }
+            for _ in 0..2 {
+                let Some(Ok(WsMessage::Text(text))) = ws.next().await else { panic!("no subscribe command") };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(command["command"], "subscribe");
+                let confirm = json!({"identifier": command["identifier"], "type": "confirm_subscription"});
+                ws.send(WsMessage::text(confirm.to_string())).await.unwrap();
+            }
+            if round == 1 {
+                held = Some(ws); // the first socket is dropped here, the second stays open
+            }
+        }
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.starts_with("GET /rooms/1/refresh?since=5&reason=connection HTTP/1.1"), "{request}");
+        cookies.lock().unwrap().push(request.lines().find(|l| l.starts_with("cookie:")).unwrap_or_default().to_string());
+        let response = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        stream.write_all(response.as_bytes()).await.unwrap();
+        done.await.ok();
+        drop(held);
+        cookies.lock().unwrap().clone()
+    }
+
+    async fn reconnect_one_person(status: u16) -> (Record, Vec<String>, usize) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve(listener, status, done_rx));
+        let ctx = Arc::new(Ctx {
+            addr,
+            refresh_path: Some("/rooms/1/refresh?since=5&reason=connection".to_string()),
+            policy: Policy::Herd,
+            retry: Duration::from_millis(20),
+            early: (1.0, 2.0, 1.0),
+            connect_timeout: Duration::from_secs(2),
+            armed: AtomicBool::new(true),
+            ready: AtomicUsize::new(0),
+            failed: AtomicUsize::new(0),
+            back: AtomicUsize::new(0),
+            attempts: Mutex::new(Vec::new()),
+        });
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let subs = vec![r#"{"channel":"PresenceChannel","room_id":1}"#.to_string(), r#"{"channel":"HeartbeatChannel"}"#.to_string()];
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let person = tokio::spawn(person(ctx.clone(), 0, "session_token=person-7".into(), subs, gate, stop_rx));
+
+        // Until the client is back, or for long enough that a refused refresh has been answered.
+        let until = Instant::now() + Duration::from_secs(if status == 200 { 10 } else { 1 });
+        while ctx.back.load(Ordering::Relaxed) == 0 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stop_tx.send(true).unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(5), person).await.unwrap().unwrap();
+        done_tx.send(()).ok();
+        let cookies = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        (record, cookies, ctx.back.load(Ordering::Relaxed))
+    }
+
+    #[tokio::test]
+    async fn a_person_the_server_drops_gets_back_in_and_refreshes_the_room() {
+        let (record, cookies, back) = reconnect_one_person(200).await;
+
+        assert_eq!(back, 1);
+        assert!(record.ready && !record.early_close);
+        assert_eq!((record.tries, record.failed_tries, record.reopens), (1, 0, 0));
+        assert_eq!(record.refresh_status, Some(200));
+        let (close, opened, welcome) = (record.close.unwrap(), record.opened.unwrap(), record.welcome.unwrap());
+        let (confirmed, back_at) = (record.confirmed.unwrap(), record.back.unwrap());
+        assert!(close <= opened && opened <= welcome && welcome <= confirmed && confirmed <= back_at);
+        assert_eq!(cookies, vec!["session_token=person-7", "session_token=person-7", "cookie: session_token=person-7"]);
+    }
+
+    #[tokio::test]
+    async fn a_person_whose_refresh_is_refused_is_not_back() {
+        let (record, _, back) = reconnect_one_person(500).await;
+
+        assert_eq!(back, 0);
+        assert!(record.confirmed.is_some(), "the subscriptions were confirmed");
+        assert_eq!(record.refresh_status, Some(500));
+        assert!(record.refreshed.is_none() && record.back.is_none());
+    }
 }
