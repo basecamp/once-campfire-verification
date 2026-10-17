@@ -138,6 +138,9 @@ try {
     .filter({ hasText: "safe browser text" })
     .waitFor()
   for (const page of [first, second]) {
+    // Receiving the broadcast in the other tab does not complete the sender’s
+    // persisted echo; optimistic previews have no data-message-id.
+    await page.waitForFunction(() => document.querySelectorAll(".messages > .message[data-message-id]").length >= 3)
     if (
       (await page.locator(".messages > .message[data-message-id]").count()) !==
       3
