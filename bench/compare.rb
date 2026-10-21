@@ -29,7 +29,11 @@ OptionParser.new do |parser|
 end.parse!
 raise "use at least two rounds" unless options[:rounds] >= 2
 apps = options[:apps].split(",")
-allowed = %w[rails django laravel express express-bun elixir go rust c cpp]
+# Jai's compiler is in closed beta, so its image can't be built from source here; the published build
+# and the revision it was built from are the default.
+JAI_PUBLISHED_REVISION = "2ecd487"
+JAI_PUBLISHED_IMAGE = "ghcr.io/lucasmeijer/once-campfire-jai:#{JAI_PUBLISHED_REVISION}"
+allowed = %w[rails django laravel express express-bun elixir go rust c cpp jai]
 raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.uniq == apps && apps.all? { |app| allowed.include?(app) }
 selected_routes = options[:routes].split(",")
 raise "unknown or empty route selection" unless !selected_routes.empty? && (selected_routes - %w[room_show messages_page sidebar search avatar static_css up post_message]).empty?
@@ -89,8 +93,13 @@ begin
     order = iteration.even? ? apps : apps.reverse
     order.each do |app|
       kind = runtimes.fetch(app)
-      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
+      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun",
+        "jai" => JAI_PUBLISHED_IMAGE }
       image = ENV.fetch("#{env_name.(app)}_IMAGE", images.fetch(app, "once-campfire-#{app}:app"))
+      # A registry image (Jai's published build: its compiler isn't public) is pulled on first use.
+      if image.include?("/") && !system("docker", "image", "inspect", image, out: File::NULL, err: File::NULL)
+        run("docker", "pull", "--quiet", image)
+      end
       source = File.join(options[:workspace], kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
       image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
       raise "#{app}: image changed between rounds" if metadata[:images].key?(app) && metadata[:images][app] != image_id
@@ -98,6 +107,9 @@ begin
       metadata[:image_labels][app] = JSON.parse(run("docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image))
       source_identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
         dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
+      if image == JAI_PUBLISHED_IMAGE && !source_identity[:head].start_with?(JAI_PUBLISHED_REVISION)
+        raise "#{app}: the published image is #{JAI_PUBLISHED_REVISION}; check out #{source} at that revision"
+      end
       raise "#{app}: source changed between rounds" if metadata[:source_revisions].key?(app) && metadata[:source_revisions][app] != source_identity
       metadata[:source_revisions][app] = source_identity
       data = File.join(work, "runtime", Process.pid.to_s, "#{app}-#{iteration + 1}")
@@ -126,6 +138,7 @@ begin
       when "laravel" then {http: "FrankenPHP/Octane", jobs: "leased auxiliary SQLite", cable: "native ReactPHP"}
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
       when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", "32"), cable: "native", jobs: "in-process"}
+      when "jai" then {processes: 1, http_loops: config.fetch("CAMPFIRE_HTTP_THREADS", "affinity, capped at 16"), request_workers: config.fetch("CAMPFIRE_WORKER_THREADS", "affinity, at least 4"), readers: "#{config.fetch("RAILS_MAX_THREADS")}, at least one per request worker", cable: "native", jobs: "in-process"}
       when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
       end
       unless %w[c cpp].include?(kind)
