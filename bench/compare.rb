@@ -127,7 +127,7 @@ begin
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
       when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", "32"), cable: "native", jobs: "in-process"}
       when "goose" then {processes: 1, http_loops: config.fetch("CAMPFIRE_HTTP_THREADS", "4"), backend: config.fetch("CAMPFIRE_HTTP_BACKEND", "epoll"),
-        response_cache: config.fetch("CAMPFIRE_CACHE", "1") == "0" ? "off" : "on", cable: "native", jobs: "none (push and webhooks not implemented)"}
+        response_cache: config.fetch("CAMPFIRE_CACHE", "1") == "0" ? "off" : "on", cable: "native", jobs: "in-process delivery and media threads"}
       when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
       end
       unless %w[c cpp goose].include?(kind)
