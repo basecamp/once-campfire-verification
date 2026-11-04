@@ -103,6 +103,9 @@ begin
       data = File.join(work, "runtime", Process.pid.to_s, "#{app}-#{iteration + 1}")
       prepare_storage(options[:seed], data)
       FileUtils.mkdir_p(File.join(data, "logs"))
+      # The images run as uid 1000; on a host whose user is another (a CI
+      # runner), the app could not write its copy of the seed to start.
+      FileUtils.chmod_R("a+rwX", data)
       db = File.join(data, "db/production.sqlite3")
       sql.call(db, "PRAGMA user_version=1;") if kind == "c"
       sql.call(db, "UPDATE push_subscriptions SET endpoint = 'https://127.0.0.1:9/push/' || id; UPDATE webhooks SET url = 'http://127.0.0.1:9/hook/' || id;")
