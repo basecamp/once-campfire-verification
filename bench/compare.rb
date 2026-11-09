@@ -127,7 +127,7 @@ begin
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
       when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", "32"), cable: "native", jobs: "in-process"}
       when "egg" then {processes: 1, http_workers: config.fetch("CAMPFIRE_WORKERS", "32"), cable_loops: config.fetch("CAMPFIRE_CABLE_LOOPS", "4"),
-        cache: config["CAMPFIRE_CACHE"] == "0" ? "off" : config["CAMPFIRE_RESPONSE_CACHE"] == "0" ? "messages only, per worker" : "responses and messages, per worker", jobs: "in-process"}
+        cache: config["CAMPFIRE_CACHE"].to_s == "0" ? "off" : config["CAMPFIRE_RESPONSE_CACHE"].to_s == "0" ? "messages only, per worker" : "responses and messages, per worker", jobs: "in-process"}
       when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
       end
       unless %w[c cpp egg].include?(kind)
